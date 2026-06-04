@@ -20,10 +20,10 @@
 
 **Purpose**: Project initialization, dependencies, and basic structure
 
-- [ ] T001 Add primary dependencies (agent-client-protocol, acpr, tokio, serde, serde_json, tokio-util, nix, uuid, chrono) via `cargo add` in Cargo.toml
-- [ ] T002 Create module structure: `src/daemon.rs`, `src/session.rs`, `src/agent.rs`, `src/bridge.rs`, `src/state.rs`, `src/error.rs`
-- [ ] T003 [P] Define error types (daemon errors, ACP errors) in `src/error.rs`
-- [ ] T004 [P] Implement CLI arg parsing (subcommands: `daemon`, `acp`) in `src/main.rs`
+- [x] T001 Add primary dependencies (agent-client-protocol, acpr, tokio, serde, serde_json, tokio-util, nix, uuid, chrono) via `cargo add` in Cargo.toml
+- [x] T002 Create module structure: `src/daemon.rs`, `src/session.rs`, `src/agent.rs`, `src/bridge.rs`, `src/state.rs`, `src/error.rs`
+- [x] T003 [P] Define error types (daemon errors, ACP errors) in `src/error.rs`
+- [x] T004 [P] Implement CLI arg parsing (subcommands: `daemon`, `acp`) in `src/main.rs`
 
 **Validate**: `cargo build` succeeds, `cargo run -- --help` shows subcommands.
 
@@ -35,14 +35,14 @@
 
 **CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T005 Implement `DaemonState` and `SessionRecord` structs with serde serialization in `src/state.rs`
-- [ ] T006 Implement state file persistence (atomic write via temp+rename, load on startup) in `src/state.rs`
-- [ ] T007 Implement `CachedCapabilities` struct and lookup logic in `src/state.rs`
-- [ ] T008 Implement agent spawning using `Acpr::new("claude-acp")` + `Client.builder().connect_with(...)` in `src/agent.rs`
-- [ ] T009 Implement `BridgeHandler` (dynamic handler that forwards all dispatches to agent connection) in `src/bridge.rs`
-- [ ] T010 Implement Unix socket listener and per-client task spawning in `src/daemon.rs`
-- [ ] T011 Implement `Agent.builder()` connection setup with static handlers for `initialize` and `session/list` in `src/daemon.rs`
-- [ ] T012 Write `src/guidelines.md` with initial agent interaction guidelines (included via `include_str!`)
+- [x] T005 Implement `DaemonState` and `SessionRecord` structs with serde serialization in `src/state.rs`
+- [x] T006 Implement state file persistence (atomic write via temp+rename, load on startup) in `src/state.rs`
+- [x] T007 Implement `CachedCapabilities` struct and lookup logic in `src/state.rs`
+- [x] T008 Implement agent spawning using `Acpr::new("claude-acp")` + `Client.builder().connect_with(...)` in `src/agent.rs`
+- [x] T009 Implement `BridgeHandler` (dynamic handler that forwards all dispatches to agent connection) in `src/bridge.rs`
+- [x] T010 Implement Unix socket listener and per-client task spawning in `src/daemon.rs`
+- [x] T011 Implement `Agent.builder()` connection setup with static handlers for `initialize` and `session/list` in `src/daemon.rs`
+- [x] T012 Write `src/guidelines.md` with initial agent interaction guidelines (included via `include_str!`)
 
 **Tests to write and pass**:
 
@@ -71,16 +71,16 @@ Integration test `tests/integration/daemon_startup.rs`:
 
 ### Implementation for User Story 1
 
-- [ ] T013 [US1] Implement `session/new` handler: spawn agent via `cx.spawn()`, ACP init, send `session/new` to agent with MCP server declaration, install `BridgeHandler`, respond to client in `src/daemon.rs`
-- [ ] T014 [US1] Implement `session/load` handler (agent dead): spawn agent, send `session/load`, relay history replay notifications to client, install bridge in `src/daemon.rs`
-- [ ] T015 [US1] Implement `session/load` handler (agent alive): replay in-memory buffer to client, install bridge in `src/daemon.rs`
-- [ ] T016 [US1] Implement `session/resume` handler (agent dead): spawn agent, send `session/load` (buffer replay but don't relay to client), install bridge in `src/daemon.rs`
-- [ ] T017 [US1] Implement `session/resume` handler (agent alive): install bridge immediately (no replay) in `src/daemon.rs`
-- [ ] T018 [US1] Implement in-memory message buffer: record all ACP messages on agent stdio pipe in `src/session.rs`
-- [ ] T019 [US1] Implement one-client-per-session enforcement: disconnect existing client on new `session/load`/`session/resume` in `src/session.rs`
-- [ ] T020 [US1] Implement interaction guidelines delivery: send `prompt/start` with compiled guidelines as first prompt after session setup in `src/session.rs`
-- [ ] T021 [US1] Implement capabilities cache population: on cache miss, spawn temp agent, forward `initialize`, cache response, kill temp agent in `src/agent.rs`
-- [ ] T022 [US1] Implement `acp` mode: stdio-based ACP client that connects to daemon socket (auto-starting daemon if socket missing) in `src/main.rs`
+- [x] T013 [US1] Implement `session/new` handler: spawn agent via `cx.spawn()`, ACP init, send `session/new` to agent with MCP server declaration, install `BridgeHandler`, respond to client in `src/daemon.rs`
+- [x] T014 [US1] Implement `session/load` handler (agent dead): spawn agent, send `session/load`, relay history replay notifications to client, install bridge in `src/daemon.rs`
+- [x] T015 [US1] Implement `session/load` handler (agent alive): replay in-memory buffer to client, install bridge in `src/daemon.rs`
+- [x] T016 [US1] Implement `session/resume` handler (agent dead): spawn agent, send `session/load` (buffer replay but don't relay to client), install bridge in `src/daemon.rs`
+- [x] T017 [US1] Implement `session/resume` handler (agent alive): install bridge immediately (no replay) in `src/daemon.rs`
+- [x] T018 [US1] Implement in-memory message buffer: record all ACP messages on agent stdio pipe in `src/session.rs`
+- [x] T019 [US1] Implement one-client-per-session enforcement: disconnect existing client on new `session/load`/`session/resume` in `src/session.rs`
+- [x] T020 [US1] Implement interaction guidelines delivery: send `prompt/start` with compiled guidelines as first prompt after session setup in `src/session.rs`
+- [x] T021 [US1] Implement capabilities cache population: on cache miss, spawn temp agent, forward `initialize`, cache response, kill temp agent in `src/agent.rs`
+- [x] T022 [US1] Implement `acp` mode: stdio-based ACP client that connects to daemon socket (auto-starting daemon if socket missing) in `src/main.rs`
 
 **Tests to write and pass**:
 
@@ -109,14 +109,14 @@ Integration test `tests/integration/acp_mode.rs`:
 
 ### Implementation for User Story 4
 
-- [ ] T023 [US4] Implement `LifecycleState` enum and state machine transitions in `src/session.rs`
-- [ ] T024 [US4] Implement turn completion detection: track `prompt/start` response as turn-complete signal in `src/session.rs`
-- [ ] T025 [US4] Implement pipe quiescence detection: 10-second silence timer after turn completion in `src/session.rs`
-- [ ] T026 [US4] Implement idle timer: start after quiescence when no clients connected, kill agent on expiry in `src/session.rs`
-- [ ] T027 [US4] Implement client-keeps-alive logic: connected client prevents idle timer from starting in `src/session.rs`
-- [ ] T028 [US4] Implement agent kill sequence: SIGTERM then SIGKILL, discard in-memory buffer, transition to `AgentDead` in `src/agent.rs`
-- [ ] T029 [US4] Implement working directory monitoring: detect deleted cwd, terminate agent, remove session from state in `src/session.rs`
-- [ ] T030 [US4] Implement daemon always sends `session/load` to agent (not `session/resume`): ensures buffer population for future clients in `src/agent.rs`
+- [x] T023 [US4] Implement `LifecycleState` enum and state machine transitions in `src/session.rs`
+- [x] T024 [US4] Implement turn completion detection: track `prompt/start` response as turn-complete signal in `src/session.rs`
+- [x] T025 [US4] Implement pipe quiescence detection: 10-second silence timer after turn completion in `src/session.rs`
+- [x] T026 [US4] Implement idle timer: start after quiescence when no clients connected, kill agent on expiry in `src/session.rs`
+- [x] T027 [US4] Implement client-keeps-alive logic: connected client prevents idle timer from starting in `src/session.rs`
+- [x] T028 [US4] Implement agent kill sequence: SIGTERM then SIGKILL, discard in-memory buffer, transition to `AgentDead` in `src/agent.rs`
+- [x] T029 [US4] Implement working directory monitoring: detect deleted cwd, terminate agent, remove session from state in `src/session.rs`
+- [x] T030 [US4] Implement daemon always sends `session/load` to agent (not `session/resume`): ensures buffer population for future clients in `src/agent.rs`
 
 **Tests to write and pass**:
 
@@ -140,11 +140,11 @@ Integration test `tests/integration/agent_lifecycle.rs`:
 
 **Purpose**: Improvements that affect multiple user stories
 
-- [ ] T031 [P] Implement structured logging (tracing) across all modules in `src/main.rs` and module files
-- [ ] T032 [P] Implement ACP error responses: meaningful errors for agent spawn failure, session not found, etc. in `src/error.rs`
-- [ ] T033 Implement graceful daemon shutdown: stop all agents, clean up socket file in `src/daemon.rs`
-- [ ] T034 Implement daemon auto-start logic in `acp` mode: if socket doesn't exist, spawn daemon process, retry connect in `src/main.rs`
-- [ ] T035 [P] Create `tests/helpers/mock_agent.rs`: minimal ACP-speaking binary for integration tests
+- [x] T031 [P] Implement structured logging (tracing) across all modules in `src/main.rs` and module files
+- [x] T032 [P] Implement ACP error responses: meaningful errors for agent spawn failure, session not found, etc. in `src/error.rs`
+- [x] T033 Implement graceful daemon shutdown: stop all agents, clean up socket file in `src/daemon.rs`
+- [x] T034 Implement daemon auto-start logic in `acp` mode: if socket doesn't exist, spawn daemon process, retry connect in `src/main.rs`
+- [x] T035 [P] Create `tests/helpers/mock_agent.rs`: minimal ACP-speaking binary for integration tests
 
 **Final validation**:
 - `cargo test --all` passes (all unit + integration tests)

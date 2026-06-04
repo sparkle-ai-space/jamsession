@@ -1,4 +1,7 @@
 /target
 /book
 .claude
+*.log
+.env*
+.idea/
 
