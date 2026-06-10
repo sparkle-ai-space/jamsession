@@ -167,6 +167,7 @@ impl SessionManager {
         }
     }
 
+    // ANCHOR: install-bridge
     /// Install bidirectional bridge between client and agent connections.
     fn install_bridge(
         client_cx: &ConnectionTo<agent_client_protocol::Client>,
@@ -188,7 +189,9 @@ impl SessionManager {
             .run_indefinitely();
         Ok(())
     }
+    // ANCHOR_END: install-bridge
 
+    // ANCHOR: handle-new-session
     /// Handle session/new: create session record, spawn agent, install bridge.
     /// Uses agent-returned session ID as canonical (T041).
     pub async fn handle_new_session(
@@ -256,7 +259,9 @@ impl SessionManager {
 
         Ok(NewSessionResponse::new(session_id))
     }
+    // ANCHOR_END: handle-new-session
 
+    // ANCHOR: handle-load-session
     /// Handle session/load: reconnect to existing session with history replay.
     pub async fn handle_load_session(
         &self,
@@ -385,6 +390,7 @@ impl SessionManager {
 
         Ok(LoadSessionResponse::new())
     }
+    // ANCHOR_END: handle-load-session
 
     /// Handle session/resume: reconnect without history replay to client.
     pub async fn handle_resume_session(
@@ -488,6 +494,7 @@ impl SessionManager {
         }
     }
 
+    // ANCHOR: disconnect-client
     /// T037: Called when a client connection closes. Starts quiescence/idle countdown.
     pub fn disconnect_client(&self, session_id: &str) {
         let mut sessions = self.sessions.lock().unwrap();
@@ -549,7 +556,9 @@ impl SessionManager {
             }
         }
     }
+    // ANCHOR_END: disconnect-client
 
+    // ANCHOR: handle-agent-crash
     /// T038: Handle unexpected agent death. Respawns once, notifies client.
     pub async fn handle_agent_crash(
         &self,
@@ -621,6 +630,7 @@ impl SessionManager {
             }
         }
     }
+    // ANCHOR_END: handle-agent-crash
 
     pub fn guidelines_prompt(session_id: &str) -> PromptRequest {
         PromptRequest::new(
@@ -639,6 +649,7 @@ impl SessionManager {
         }
     }
 
+    // ANCHOR: check-cwd-health
     /// Check all sessions for deleted working directories and clean up.
     pub fn check_cwd_health(&self, state: &Mutex<DaemonState>, state_path: &Path) {
         let mut sessions = self.sessions.lock().unwrap();
@@ -665,6 +676,7 @@ impl SessionManager {
             let _ = daemon_state.save(state_path);
         }
     }
+    // ANCHOR_END: check-cwd-health
 }
 
 /// Temporary handler to capture agent notifications during session/load replay (T040).

@@ -72,6 +72,7 @@ impl AgentManager {
         Ok(response)
     }
 
+    // ANCHOR: spawn-agent
     /// Spawn an agent subprocess and return the connection handle.
     pub fn spawn_agent_connection(
         client_cx: &ConnectionTo<agent_client_protocol::Client>,
@@ -85,7 +86,9 @@ impl AgentManager {
             )
             .map_err(|e| Error::AgentSpawn(format!("failed to spawn agent connection: {e}")))
     }
+    // ANCHOR_END: spawn-agent
 
+    // ANCHOR: initialize-agent
     /// Initialize the ACP protocol on an agent connection.
     pub async fn initialize_agent(
         agent_cx: &ConnectionTo<agent_client_protocol::Agent>,
@@ -96,7 +99,9 @@ impl AgentManager {
             .await
             .map_err(|e| Error::AgentSpawn(format!("agent initialize failed: {e}")))
     }
+    // ANCHOR_END: initialize-agent
 
+    // ANCHOR: new-session-on-agent
     /// Send session/new to an initialized agent.
     pub async fn new_session_on_agent(
         agent_cx: &ConnectionTo<agent_client_protocol::Agent>,
@@ -109,7 +114,9 @@ impl AgentManager {
             .await
             .map_err(|e| Error::AgentSpawn(format!("agent session/new failed: {e}")))
     }
+    // ANCHOR_END: new-session-on-agent
 
+    // ANCHOR: load-session-on-agent
     /// Send session/load to an initialized agent.
     pub async fn load_session_on_agent(
         agent_cx: &ConnectionTo<agent_client_protocol::Agent>,
@@ -126,6 +133,7 @@ impl AgentManager {
             .map_err(|e| Error::AgentSpawn(format!("agent session/load failed: {e}")))?;
         Ok(())
     }
+    // ANCHOR_END: load-session-on-agent
 
     pub async fn kill_agent(pid: u32) {
         use nix::sys::signal::{Signal, kill};

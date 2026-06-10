@@ -104,6 +104,7 @@ impl Daemon {
 
         tracing::info!(path = %self.socket_path.display(), "daemon listening");
 
+        // ANCHOR: cwd-health-check
         // FR-005: periodic cwd health check
         {
             let sessions = self.sessions.clone();
@@ -116,7 +117,9 @@ impl Daemon {
                 }
             });
         }
+        // ANCHOR_END: cwd-health-check
 
+        // ANCHOR: accept-loop
         loop {
             let (stream, _) = listener.accept().await?;
             let state = self.state.clone();
@@ -131,6 +134,7 @@ impl Daemon {
                 }
             });
         }
+        // ANCHOR_END: accept-loop
     }
 
     pub async fn shutdown(&self) {
@@ -179,6 +183,7 @@ async fn handle_client(
             },
             on_receive_request!(),
         )
+        // ANCHOR: handle-session-list
         .on_receive_request(
             {
                 let state = state.clone();
@@ -199,6 +204,8 @@ async fn handle_client(
             },
             on_receive_request!(),
         )
+        // ANCHOR_END: handle-session-list
+        // ANCHOR: dispatch-session-new
         .on_receive_request(
             {
                 let state = state.clone();
@@ -236,6 +243,8 @@ async fn handle_client(
             },
             on_receive_request!(),
         )
+        // ANCHOR_END: dispatch-session-new
+        // ANCHOR: dispatch-session-load
         .on_receive_request(
             {
                 let state = state.clone();
@@ -273,6 +282,7 @@ async fn handle_client(
             },
             on_receive_request!(),
         )
+        // ANCHOR_END: dispatch-session-load
         .on_receive_request(
             {
                 let state = state.clone();
@@ -309,16 +319,19 @@ async fn handle_client(
         .connect_to(transport)
         .await?;
 
+    // ANCHOR: client-disconnect
     // T037: Connection closed — trigger disconnect_client
     let session_id = active_session_id.lock().unwrap().clone();
     if let Some(sid) = session_id {
         tracing::debug!(session_id = sid, "client disconnected");
         sessions.disconnect_client(&sid);
     }
+    // ANCHOR_END: client-disconnect
 
     Ok(())
 }
 
+// ANCHOR: handle-initialize
 async fn handle_initialize(
     req: InitializeRequest,
     state: &Mutex<DaemonState>,
@@ -354,3 +367,4 @@ async fn handle_initialize(
 
     Ok(response)
 }
+// ANCHOR_END: handle-initialize

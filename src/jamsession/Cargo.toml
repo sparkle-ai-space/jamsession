@@ -26,6 +26,11 @@ tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = { version = "1.23.2", features = ["v4"] }
 
+# Transitive deps whose declared minimum doesn't compile on stable Rust.
+# Pinning here forces -Z minimal-versions to use a working release.
+lazy_static = "1.4"
+pkg-config = "0.3.27"
+
 [[bin]]
 name = "mock-agent"
 path = "tests/helpers/mock_agent.rs"

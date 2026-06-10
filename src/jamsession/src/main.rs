@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
+use clap::{Parser, Subcommand};
 use jamsession::daemon::Daemon;
 use jamsession::state::DaemonState;
-use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "jamsession", about = "Agent daemon for managing ACP sessions")]

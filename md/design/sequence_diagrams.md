@@ -31,6 +31,26 @@ sequenceDiagram
     Note over C,A: Bridged — daemon records + relays
 ```
 
+Source locations:
+- **connect** — {anchor}`accept-loop`
+- **initialize** — {anchor}`handle-initialize`
+- **session/list** — {anchor}`handle-session-list`
+- **session/new (dispatch)** — {anchor}`dispatch-session-new`
+- **session/new (impl)** — {anchor}`handle-new-session`
+- **spawn agent** — {anchor}`spawn-agent`
+- **D→A initialize** — {anchor}`initialize-agent`
+- **D→A session/new** — {anchor}`new-session-on-agent`
+- **install bridge** — {anchor}`install-bridge`
+
+Integration tests:
+- `daemon_startup::daemon_creates_socket_file` — connect step (daemon listens on Unix socket)
+- `daemon_startup::daemon_accepts_connection_and_responds_to_initialize` — initialize exchange
+- `daemon_startup::session_list_returns_empty` — session/list on fresh daemon
+- `session_lifecycle::new_session_creates_session_and_returns_id` — full session/new flow through agent
+- `session_lifecycle::new_session_persists_to_state_file` — state file persistence after session/new
+- `session_lifecycle::session_list_shows_created_session` — session/list after session/new
+- `session_lifecycle::new_session_with_invalid_cwd_returns_error` — error path (invalid directory)
+
 ## Reconnect -- load session (agent dead)
 
 ```mermaid
@@ -56,6 +76,18 @@ sequenceDiagram
     Note over C,A: Bridged — daemon records + relays
 ```
 
+Source locations:
+- **session/load (dispatch)** — {anchor}`dispatch-session-load`
+- **session/load (impl)** — {anchor}`handle-load-session`
+- **spawn agent** — {anchor}`spawn-agent`
+- **D→A initialize** — {anchor}`initialize-agent`
+- **D→A session/load** — {anchor}`load-session-on-agent`
+- **install bridge** — {anchor}`install-bridge`
+
+Integration tests:
+- `session_lifecycle::load_session_after_create` — create session, drop connection, load on new connection (agent respawns)
+- `session_lifecycle::load_nonexistent_session_returns_error` — error path (unknown sessionId)
+
 ## Reconnect -- load session (agent alive)
 
 ```mermaid
@@ -77,6 +109,13 @@ sequenceDiagram
 
     Note over C,A: Client bridged to live stream
 ```
+
+Source locations:
+- **session/load (impl, `ReplayFromLive` branch)** — {anchor}`handle-load-session`
+- **install bridge** — {anchor}`install-bridge`
+
+Integration tests:
+- `session_lifecycle::resume_session_after_create` — create session, reconnect while agent is still alive (session/resume)
 
 ## Idle spin-down
 
@@ -102,6 +141,12 @@ sequenceDiagram
     Note over D: Buffer discarded<br/>Session record persists
 ```
 
+Source locations:
+- **disconnect** — {anchor}`client-disconnect`
+- **quiescence + idle timer** — {anchor}`disconnect-client`
+
+Integration tests: *none yet*
+
 ## Auto-respawn on crash
 
 ```mermaid
@@ -124,6 +169,15 @@ sequenceDiagram
     Note over C,A2: Bridge re-installed, client continues
 ```
 
+Source locations:
+- **crash detection + respawn** — {anchor}`handle-agent-crash`
+- **spawn agent** — {anchor}`spawn-agent`
+- **D→A initialize** — {anchor}`initialize-agent`
+- **D→A session/load** — {anchor}`load-session-on-agent`
+- **install bridge** — {anchor}`install-bridge`
+
+Integration tests: *none yet*
+
 ## One-client-per-session enforcement
 
 ```mermaid
@@ -142,6 +196,11 @@ sequenceDiagram
     Note over C2,A: C2 bridged to agent
 ```
 
+Source locations:
+- **cancel previous client** — {anchor}`handle-load-session` (the `client_cancel.notify_waiters()` call at the top)
+
+Integration tests: *none yet*
+
 ## Directory deleted -- session cleanup
 
 ```mermaid
@@ -157,3 +216,9 @@ sequenceDiagram
 
     Note over D: Remove session from state file
 ```
+
+Source locations:
+- **periodic health check spawn** — {anchor}`cwd-health-check`
+- **detect + cleanup** — {anchor}`check-cwd-health`
+
+Integration tests: *none yet*

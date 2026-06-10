@@ -57,10 +57,10 @@ async fn send_request(stream: &mut UnixStream, request: serde_json::Value) -> se
             if line.is_empty() {
                 continue;
             }
-            if let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) {
-                if msg.get("id") == expected_id.as_ref() {
-                    return msg;
-                }
+            if let Ok(msg) = serde_json::from_str::<serde_json::Value>(line)
+                && msg.get("id") == expected_id.as_ref()
+            {
+                return msg;
             }
         }
     }

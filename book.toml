@@ -4,6 +4,12 @@ authors = ["Niko Matsakis"]
 language = "en"
 src = "md"
 
+[preprocessor.anchor]
+command = "cargo run -p jamsession-mdbook --"
+scan-dirs = ["src"]
+github-repo = "nikomatsakis/jamsession"
+github-branch = "main"
+
 [preprocessor.mermaid]
 command = "mdbook-mermaid"
 
