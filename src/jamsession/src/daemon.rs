@@ -13,9 +13,9 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Notify;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-use crate::agent::{AgentManager, AgentTransport};
+use crate::agent::{AgentFactory, AgentManager};
 use crate::error::Error;
-use crate::session::SessionManager;
+use crate::session::{LifecycleEvent, LifecycleEventSender, SessionManager};
 use crate::state::DaemonState;
 
 /// Long-running background process that listens on a Unix socket,
@@ -23,14 +23,20 @@ use crate::state::DaemonState;
 pub struct Daemon {
     /// Persistent session registry and capabilities cache, shared across client tasks.
     state: Arc<Mutex<DaemonState>>,
-    /// In-memory session state (lifecycle, buffers, agent connections).
-    sessions: Arc<SessionManager>,
     /// Path to the Unix domain socket (e.g. `~/.jamsession/daemon.sock`).
     socket_path: PathBuf,
     /// Path to the persistent state file (e.g. `~/.jamsession/state.json`).
     state_path: PathBuf,
-    /// How to spawn agent processes (registry lookup or direct binary path).
-    agent_transport: AgentTransport,
+    /// How to spawn agent processes.
+    factory: Arc<dyn AgentFactory>,
+    /// Agent idle timeout.
+    idle_timeout: std::time::Duration,
+    /// Quiescence timeout (pipe silence before idle timer starts).
+    quiescence_timeout: std::time::Duration,
+    /// Whether to send guidelines as first prompt on new sessions.
+    send_guidelines: bool,
+    /// Optional channel for lifecycle event notifications.
+    lifecycle_tx: Option<LifecycleEventSender>,
 }
 
 impl Daemon {
@@ -38,10 +44,13 @@ impl Daemon {
         let state = DaemonState::load(state_path);
         Self {
             state: Arc::new(Mutex::new(state)),
-            sessions: Arc::new(SessionManager::new()),
             socket_path: Self::socket_path(),
             state_path: state_path.to_path_buf(),
-            agent_transport: AgentTransport::default(),
+            factory: Arc::new(crate::agent::AcprFactory::default()),
+            idle_timeout: std::time::Duration::from_secs(900),
+            quiescence_timeout: std::time::Duration::from_secs(10),
+            send_guidelines: true,
+            lifecycle_tx: None,
         }
     }
 
@@ -49,26 +58,38 @@ impl Daemon {
         let state = DaemonState::load(state_path);
         Self {
             state: Arc::new(Mutex::new(state)),
-            sessions: Arc::new(SessionManager::new()),
             socket_path: socket_path.to_path_buf(),
             state_path: state_path.to_path_buf(),
-            agent_transport: AgentTransport::default(),
+            factory: Arc::new(crate::agent::AcprFactory::default()),
+            idle_timeout: std::time::Duration::from_secs(900),
+            quiescence_timeout: std::time::Duration::from_secs(10),
+            send_guidelines: true,
+            lifecycle_tx: None,
         }
     }
 
-    pub fn with_agent_transport(mut self, transport: AgentTransport) -> Self {
-        self.agent_transport = transport.clone();
-        self.sessions = Arc::new(SessionManager::new().with_agent_transport(transport));
+    pub fn with_factory(mut self, factory: Arc<dyn AgentFactory>) -> Self {
+        self.factory = factory;
         self
     }
 
     pub fn with_idle_timeout(mut self, timeout: std::time::Duration) -> Self {
-        let transport = self.agent_transport.clone();
-        self.sessions = Arc::new(
-            SessionManager::new()
-                .with_agent_transport(transport)
-                .with_idle_timeout(timeout),
-        );
+        self.idle_timeout = timeout;
+        self
+    }
+
+    pub fn with_quiescence_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.quiescence_timeout = timeout;
+        self
+    }
+
+    pub fn with_send_guidelines(mut self, send: bool) -> Self {
+        self.send_guidelines = send;
+        self
+    }
+
+    pub fn with_lifecycle_events(mut self, tx: LifecycleEventSender) -> Self {
+        self.lifecycle_tx = Some(tx);
         self
     }
 
@@ -80,10 +101,20 @@ impl Daemon {
     }
 
     pub async fn run(&self) -> Result<(), Error> {
+        let mut session_mgr = SessionManager::new()
+            .with_factory(self.factory.clone())
+            .with_idle_timeout(self.idle_timeout)
+            .with_quiescence_timeout(self.quiescence_timeout)
+            .with_send_guidelines(self.send_guidelines);
+        if let Some(tx) = &self.lifecycle_tx {
+            session_mgr = session_mgr.with_lifecycle_events(tx.clone());
+        }
+        let sessions = Arc::new(session_mgr);
+
         // Rehydrate live sessions from persistent state
         {
             let state = self.state.lock().unwrap().clone();
-            self.sessions.rehydrate_from_state(&state);
+            sessions.rehydrate_from_state(&state);
         }
 
         if let Some(parent) = self.socket_path.parent() {
@@ -104,10 +135,14 @@ impl Daemon {
 
         tracing::info!(path = %self.socket_path.display(), "daemon listening");
 
+        if let Some(tx) = &self.lifecycle_tx {
+            let _ = tx.send(LifecycleEvent::Initialized);
+        }
+
         // ANCHOR: cwd-health-check
         // FR-005: periodic cwd health check
         {
-            let sessions = self.sessions.clone();
+            let sessions = sessions.clone();
             let state = self.state.clone();
             let state_path = self.state_path.clone();
             tokio::spawn(async move {
@@ -123,12 +158,13 @@ impl Daemon {
         loop {
             let (stream, _) = listener.accept().await?;
             let state = self.state.clone();
-            let sessions = self.sessions.clone();
+            let sessions = sessions.clone();
             let state_path = self.state_path.clone();
-            let agent_transport = self.agent_transport.clone();
+            let factory = self.factory.clone();
+            let lifecycle_tx = self.lifecycle_tx.clone();
             tokio::spawn(async move {
                 if let Err(e) =
-                    handle_client(stream, state, sessions, state_path, agent_transport).await
+                    handle_client(stream, state, sessions, state_path, factory, lifecycle_tx).await
                 {
                     tracing::error!("client connection error: {e}");
                 }
@@ -138,7 +174,6 @@ impl Daemon {
     }
 
     pub async fn shutdown(&self) {
-        self.sessions.kill_all_agents();
         let _ = tokio::fs::remove_file(&self.socket_path).await;
         tracing::info!("daemon shut down");
     }
@@ -149,8 +184,12 @@ async fn handle_client(
     state: Arc<Mutex<DaemonState>>,
     sessions: Arc<SessionManager>,
     state_path: PathBuf,
-    agent_transport: AgentTransport,
+    factory: Arc<dyn AgentFactory>,
+    lifecycle_tx: Option<LifecycleEventSender>,
 ) -> Result<(), agent_client_protocol::Error> {
+    if let Some(tx) = &lifecycle_tx {
+        let _ = tx.send(LifecycleEvent::ClientConnected);
+    }
     let (read_half, write_half) = stream.into_split();
     let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
 
@@ -166,14 +205,14 @@ async fn handle_client(
         .on_receive_request(
             {
                 let state = state.clone();
-                let agent_transport = agent_transport.clone();
+                let factory = factory.clone();
                 async move |req: InitializeRequest,
                             responder: Responder<InitializeResponse>,
                             cx: ConnectionTo<agent_client_protocol::Client>| {
                     let state = state.clone();
-                    let agent_transport = agent_transport.clone();
+                    let factory = factory.clone();
                     cx.spawn(async move {
-                        let response = handle_initialize(req, &state, &agent_transport)
+                        let response = handle_initialize(req, &state, factory.as_ref())
                             .await
                             .map_err(|e| agent_client_protocol::Error::from(&e))?;
                         responder.respond(response)
@@ -322,11 +361,15 @@ async fn handle_client(
     // ANCHOR: client-disconnect
     // T037: Connection closed — trigger disconnect_client
     let session_id = active_session_id.lock().unwrap().clone();
-    if let Some(sid) = session_id {
+    if let Some(ref sid) = session_id {
         tracing::debug!(session_id = sid, "client disconnected");
-        sessions.disconnect_client(&sid);
+        sessions.disconnect_client(sid);
     }
     // ANCHOR_END: client-disconnect
+
+    if let Some(tx) = &lifecycle_tx {
+        let _ = tx.send(LifecycleEvent::ClientDisconnected { session_id });
+    }
 
     Ok(())
 }
@@ -335,7 +378,7 @@ async fn handle_client(
 async fn handle_initialize(
     req: InitializeRequest,
     state: &Mutex<DaemonState>,
-    agent_transport: &AgentTransport,
+    factory: &dyn AgentFactory,
 ) -> Result<InitializeResponse, Error> {
     let caps_value =
         serde_json::to_value(&req.client_capabilities).unwrap_or(serde_json::Value::Null);
@@ -351,7 +394,7 @@ async fn handle_initialize(
         }
     }
 
-    let response = AgentManager::get_capabilities(&req, agent_transport).await?;
+    let response = AgentManager::get_capabilities(&req, factory).await?;
 
     let response_value = serde_json::to_value(&response).unwrap_or(serde_json::Value::Null);
     {

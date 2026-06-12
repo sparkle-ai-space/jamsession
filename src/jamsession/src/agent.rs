@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::Path;
 use std::str::FromStr;
 
 use agent_client_protocol::schema::{
@@ -9,30 +9,70 @@ use agent_client_protocol::{AcpAgent, Client, ConnectionTo, DynConnectTo};
 
 use crate::error::Error;
 
-/// Configuration for how the daemon spawns agent processes.
-#[derive(Debug, Clone)]
-pub enum AgentTransport {
-    /// Use acpr registry to resolve agent by name (production).
-    Registry(String),
-    /// Use a specific binary path (testing).
-    Binary(PathBuf),
+/// Factory for creating agent connections. The daemon calls this when
+/// a session needs an agent (session/new, session/load with dead agent).
+///
+/// The factory returns a type-erased transport; the caller connects to it
+/// via `client_cx.spawn_connection(...)`.
+pub trait AgentFactory: Send + Sync + 'static {
+    fn create_transport(
+        &self,
+        session_id: &str,
+        cwd: &Path,
+        mcp_servers: &[McpServer],
+    ) -> Result<DynConnectTo<Client>, Error>;
 }
 
-impl Default for AgentTransport {
-    fn default() -> Self {
-        Self::Registry("claude-acp".to_string())
+/// Production factory: spawns agent via acpr registry.
+pub struct AcprFactory {
+    name: String,
+}
+
+impl AcprFactory {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
     }
 }
 
-impl AgentTransport {
-    fn make_transport(&self) -> DynConnectTo<Client> {
-        match self {
-            Self::Registry(name) => DynConnectTo::new(acpr::Acpr::new(name)),
-            Self::Binary(path) => {
-                let cmd = path.display().to_string();
-                DynConnectTo::new(AcpAgent::from_str(&cmd).expect("valid agent command"))
-            }
-        }
+impl Default for AcprFactory {
+    fn default() -> Self {
+        Self::new("claude-acp")
+    }
+}
+
+impl AgentFactory for AcprFactory {
+    fn create_transport(
+        &self,
+        _session_id: &str,
+        _cwd: &Path,
+        _mcp_servers: &[McpServer],
+    ) -> Result<DynConnectTo<Client>, Error> {
+        Ok(DynConnectTo::new(acpr::Acpr::new(&self.name)))
+    }
+}
+
+/// Test/dev factory: spawns agent from a binary path.
+pub struct BinaryFactory {
+    path: std::path::PathBuf,
+}
+
+impl BinaryFactory {
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+}
+
+impl AgentFactory for BinaryFactory {
+    fn create_transport(
+        &self,
+        _session_id: &str,
+        _cwd: &Path,
+        _mcp_servers: &[McpServer],
+    ) -> Result<DynConnectTo<Client>, Error> {
+        let cmd = self.path.display().to_string();
+        Ok(DynConnectTo::new(
+            AcpAgent::from_str(&cmd).expect("valid agent command"),
+        ))
     }
 }
 
@@ -40,14 +80,11 @@ pub struct AgentManager;
 
 impl AgentManager {
     /// Probe agent capabilities by spawning a short-lived "temp agent" (FR-008).
-    /// We spin up a full agent connection just to exchange `initialize`, then drop it.
-    /// The response is cached daemon-side so subsequent clients with the same
-    /// clientCapabilities skip this entirely.
     pub async fn get_capabilities(
         req: &InitializeRequest,
-        transport_config: &AgentTransport,
+        factory: &dyn AgentFactory,
     ) -> Result<InitializeResponse, Error> {
-        let agent_transport = transport_config.make_transport();
+        let agent_transport = factory.create_transport("", Path::new("/"), &[])?;
         let init_req = req.clone();
 
         let response = Client
@@ -72,13 +109,15 @@ impl AgentManager {
         Ok(response)
     }
 
-    // ANCHOR: spawn-agent
     /// Spawn an agent subprocess and return the connection handle.
     pub fn spawn_agent_connection(
         client_cx: &ConnectionTo<agent_client_protocol::Client>,
-        transport_config: &AgentTransport,
+        factory: &dyn AgentFactory,
+        session_id: &str,
+        cwd: &Path,
+        mcp_servers: &[McpServer],
     ) -> Result<ConnectionTo<agent_client_protocol::Agent>, Error> {
-        let agent_transport = transport_config.make_transport();
+        let agent_transport = factory.create_transport(session_id, cwd, mcp_servers)?;
         client_cx
             .spawn_connection(
                 Client.builder().name("jamsession-daemon-agent"),
@@ -86,9 +125,7 @@ impl AgentManager {
             )
             .map_err(|e| Error::AgentSpawn(format!("failed to spawn agent connection: {e}")))
     }
-    // ANCHOR_END: spawn-agent
 
-    // ANCHOR: initialize-agent
     /// Initialize the ACP protocol on an agent connection.
     pub async fn initialize_agent(
         agent_cx: &ConnectionTo<agent_client_protocol::Agent>,
@@ -99,9 +136,7 @@ impl AgentManager {
             .await
             .map_err(|e| Error::AgentSpawn(format!("agent initialize failed: {e}")))
     }
-    // ANCHOR_END: initialize-agent
 
-    // ANCHOR: new-session-on-agent
     /// Send session/new to an initialized agent.
     pub async fn new_session_on_agent(
         agent_cx: &ConnectionTo<agent_client_protocol::Agent>,
@@ -114,9 +149,7 @@ impl AgentManager {
             .await
             .map_err(|e| Error::AgentSpawn(format!("agent session/new failed: {e}")))
     }
-    // ANCHOR_END: new-session-on-agent
 
-    // ANCHOR: load-session-on-agent
     /// Send session/load to an initialized agent.
     pub async fn load_session_on_agent(
         agent_cx: &ConnectionTo<agent_client_protocol::Agent>,
@@ -133,7 +166,6 @@ impl AgentManager {
             .map_err(|e| Error::AgentSpawn(format!("agent session/load failed: {e}")))?;
         Ok(())
     }
-    // ANCHOR_END: load-session-on-agent
 
     pub async fn kill_agent(pid: u32) {
         use nix::sys::signal::{Signal, kill};

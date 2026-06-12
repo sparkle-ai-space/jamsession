@@ -1,0 +1,26 @@
+[package]
+name = "jamsession-test"
+version = "0.1.0"
+edition = "2024"
+description = "Integration test harness for jamsession"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+jamsession = { path = "../jamsession" }
+agent-client-protocol = "0.13.1"
+rhaicp = "2.1.0"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+tempfile = "3"
+expect-test = "1.5.1"
+
+[[bin]]
+name = "mock-agent"
+path = "src/bin/mock-agent.rs"
+
+[dev-dependencies]
+expect-test = "1.5.1"
+rhaicp = "2.1.0"
+serde_json = "1"
+tempfile = "3"

@@ -1,7 +1,8 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
-use jamsession::agent::AgentTransport;
+use jamsession::agent::BinaryFactory;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
@@ -22,7 +23,7 @@ async fn start_daemon(
     let mock_binary = mock_agent_binary();
     let handle = tokio::spawn(async move {
         let daemon = jamsession::daemon::Daemon::new_with_paths(&state_path, &socket_path_clone)
-            .with_agent_transport(AgentTransport::Binary(mock_binary));
+            .with_factory(Arc::new(BinaryFactory::new(mock_binary)));
         let _ = daemon.run().await;
     });
 
