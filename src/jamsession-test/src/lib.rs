@@ -1,7 +1,7 @@
 mod transport;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::schema::{McpServer, SessionId};
@@ -12,6 +12,7 @@ use rhaicp::RhaiAgent;
 use tokio::sync::mpsc;
 use transport::UnixSocketTransport;
 
+pub use expect_test;
 pub use jamsession::LifecycleEvent;
 pub use rhaicp::PriorSession;
 
@@ -82,7 +83,9 @@ pub struct TestDaemon {
     _temp_dir: tempfile::TempDir,
     socket_path: PathBuf,
     _daemon_handle: tokio::task::JoinHandle<()>,
-    lifecycle_rx: mpsc::UnboundedReceiver<LifecycleEvent>,
+    _drain_handle: tokio::task::JoinHandle<()>,
+    events: Arc<Mutex<Vec<LifecycleEvent>>>,
+    notify: Arc<tokio::sync::Notify>,
 }
 
 impl TestDaemon {
@@ -96,7 +99,7 @@ impl TestDaemon {
         let factory: Arc<dyn AgentFactory> = Arc::new(RhaiAgentFactory::new(&config));
         let idle_timeout = config.idle_timeout;
 
-        let (lifecycle_tx, mut lifecycle_rx) = mpsc::unbounded_channel();
+        let (lifecycle_tx, lifecycle_rx) = mpsc::unbounded_channel();
 
         let socket_path_clone = socket_path.clone();
         let daemon_handle = tokio::spawn(async move {
@@ -110,43 +113,128 @@ impl TestDaemon {
             let _ = daemon.run().await;
         });
 
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                match lifecycle_rx.recv().await {
-                    Some(LifecycleEvent::Initialized) => break,
-                    Some(_) => continue,
-                    None => panic!("daemon task exited before sending Initialized"),
-                }
-            }
-        })
-        .await
-        .expect("TestDaemon did not initialize within 2 seconds");
+        let events: Arc<Mutex<Vec<LifecycleEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let notify = Arc::new(tokio::sync::Notify::new());
 
-        Self {
+        let drain_handle = {
+            let events = events.clone();
+            let notify = notify.clone();
+            tokio::spawn(async move {
+                Self::drain_events(lifecycle_rx, events, notify).await;
+            })
+        };
+
+        let this = Self {
             _temp_dir: temp_dir,
             socket_path,
             _daemon_handle: daemon_handle,
-            lifecycle_rx,
+            _drain_handle: drain_handle,
+            events,
+            notify,
+        };
+
+        this.wait_for(
+            |e| matches!(e, LifecycleEvent::Initialized),
+            Duration::from_secs(2),
+        )
+        .await;
+
+        this
+    }
+
+    async fn drain_events(
+        mut rx: mpsc::UnboundedReceiver<LifecycleEvent>,
+        events: Arc<Mutex<Vec<LifecycleEvent>>>,
+        notify: Arc<tokio::sync::Notify>,
+    ) {
+        while let Some(event) = rx.recv().await {
+            events.lock().unwrap().push(event);
+            notify.notify_waiters();
         }
     }
 
     /// Block until a lifecycle event matching `predicate` is received, or timeout.
     pub async fn wait_for(
-        &mut self,
+        &self,
         predicate: impl Fn(&LifecycleEvent) -> bool,
         timeout: Duration,
     ) -> LifecycleEvent {
-        tokio::time::timeout(timeout, async {
+        let result = tokio::time::timeout(timeout, async {
+            let mut seen = 0;
             loop {
-                match self.lifecycle_rx.recv().await {
-                    Some(event) if predicate(&event) => return event,
-                    Some(_) => continue,
-                    None => panic!("daemon task exited while waiting for lifecycle event"),
+                let notified = self.notify.notified();
+                {
+                    let events = self.events.lock().unwrap();
+                    while seen < events.len() {
+                        if predicate(&events[seen]) {
+                            return events[seen].clone();
+                        }
+                        seen += 1;
+                    }
                 }
+                notified.await;
             }
         })
-        .await
-        .expect("timed out waiting for lifecycle event")
+        .await;
+        result.expect("timed out waiting for lifecycle event")
+    }
+
+    /// Assert the full lifecycle event trace matches the expected snapshot.
+    /// Events with session IDs are normalized to `$session0`, `$session1`, etc.
+    pub fn assert_lifecycle_events(&self, expected: expect_test::Expect) {
+        let events = self.events.lock().unwrap();
+        let mut session_ids: Vec<String> = Vec::new();
+        let output: Vec<String> = events
+            .iter()
+            .map(|e| Self::normalize_event_display(e, &mut session_ids))
+            .collect();
+        expected.assert_eq(&output.join("\n"));
+    }
+
+    fn normalize_event_display(event: &LifecycleEvent, session_ids: &mut Vec<String>) -> String {
+        let normalize_sid = |sid: &str, ids: &mut Vec<String>| -> String {
+            if let Some(pos) = ids.iter().position(|s| s == sid) {
+                format!("$session{pos}")
+            } else {
+                let pos = ids.len();
+                ids.push(sid.to_string());
+                format!("$session{pos}")
+            }
+        };
+
+        match event {
+            LifecycleEvent::Initialized => "Initialized".to_string(),
+            LifecycleEvent::ClientConnected => "ClientConnected".to_string(),
+            LifecycleEvent::ClientDisconnected { session_id: None } => {
+                "ClientDisconnected".to_string()
+            }
+            LifecycleEvent::ClientDisconnected {
+                session_id: Some(sid),
+            } => {
+                let normalized = normalize_sid(sid, session_ids);
+                format!("ClientDisconnected({normalized})")
+            }
+            LifecycleEvent::SessionCreated { session_id } => {
+                let normalized = normalize_sid(session_id, session_ids);
+                format!("SessionCreated({normalized})")
+            }
+            LifecycleEvent::SessionLoaded { session_id } => {
+                let normalized = normalize_sid(session_id, session_ids);
+                format!("SessionLoaded({normalized})")
+            }
+            LifecycleEvent::SessionResumed { session_id } => {
+                let normalized = normalize_sid(session_id, session_ids);
+                format!("SessionResumed({normalized})")
+            }
+            LifecycleEvent::AgentQuiescent { session_id } => {
+                let normalized = normalize_sid(session_id, session_ids);
+                format!("AgentQuiescent({normalized})")
+            }
+            LifecycleEvent::AgentKilledIdle { session_id } => {
+                let normalized = normalize_sid(session_id, session_ids);
+                format!("AgentKilledIdle({normalized})")
+            }
+        }
     }
 
     /// Execute a Rhai client script against this daemon.
@@ -174,5 +262,6 @@ impl TestDaemon {
 impl Drop for TestDaemon {
     fn drop(&mut self) {
         self._daemon_handle.abort();
+        self._drain_handle.abort();
     }
 }

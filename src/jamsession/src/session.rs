@@ -22,8 +22,38 @@ static GUIDELINES: &str = include_str!("guidelines.md");
 pub enum LifecycleEvent {
     /// The daemon has bound its socket and is accepting connections.
     Initialized,
+    /// A client has connected to the daemon socket.
+    ClientConnected,
+    /// A client has disconnected from the daemon socket.
+    ClientDisconnected { session_id: Option<String> },
+    /// A new session was created.
+    SessionCreated { session_id: String },
+    /// An existing session was loaded (with history replay).
+    SessionLoaded { session_id: String },
+    /// An existing session was resumed (without history replay).
+    SessionResumed { session_id: String },
     /// An agent session has become quiescent (no pipe activity after turn completion).
     AgentQuiescent { session_id: String },
+    /// An agent was killed due to idle timeout.
+    AgentKilledIdle { session_id: String },
+}
+
+impl std::fmt::Display for LifecycleEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Initialized => write!(f, "Initialized"),
+            Self::ClientConnected => write!(f, "ClientConnected"),
+            Self::ClientDisconnected { session_id } => match session_id {
+                Some(sid) => write!(f, "ClientDisconnected({sid})"),
+                None => write!(f, "ClientDisconnected"),
+            },
+            Self::SessionCreated { session_id } => write!(f, "SessionCreated({session_id})"),
+            Self::SessionLoaded { session_id } => write!(f, "SessionLoaded({session_id})"),
+            Self::SessionResumed { session_id } => write!(f, "SessionResumed({session_id})"),
+            Self::AgentQuiescent { session_id } => write!(f, "AgentQuiescent({session_id})"),
+            Self::AgentKilledIdle { session_id } => write!(f, "AgentKilledIdle({session_id})"),
+        }
+    }
 }
 
 pub type LifecycleEventSender = tokio::sync::mpsc::UnboundedSender<LifecycleEvent>;
@@ -188,6 +218,12 @@ impl SessionManager {
         self
     }
 
+    fn emit(&self, event: LifecycleEvent) {
+        if let Some(tx) = &self.lifecycle_tx {
+            let _ = tx.send(event);
+        }
+    }
+
     /// Populate in-memory sessions from persistent state (called on startup).
     /// Sessions start with AgentDead — agents are spawned on demand.
     pub fn rehydrate_from_state(&self, state: &DaemonState) {
@@ -296,6 +332,10 @@ impl SessionManager {
             live.respawn_attempted = false;
             sessions.insert(session_id.clone(), live);
         }
+
+        self.emit(LifecycleEvent::SessionCreated {
+            session_id: session_id.clone(),
+        });
 
         Ok(NewSessionResponse::new(session_id))
     }
@@ -433,6 +473,10 @@ impl SessionManager {
             }
         }
 
+        self.emit(LifecycleEvent::SessionLoaded {
+            session_id: session_id.to_string(),
+        });
+
         Ok(LoadSessionResponse::new())
     }
     // ANCHOR_END: handle-load-session
@@ -533,6 +577,10 @@ impl SessionManager {
             }
         }
 
+        self.emit(LifecycleEvent::SessionResumed {
+            session_id: session_id.to_string(),
+        });
+
         Ok(ResumeSessionResponse::new())
     }
 
@@ -608,6 +656,12 @@ impl SessionManager {
                         s.agent_cx = None;
                         s.buffer = Arc::new(Mutex::new(Vec::new()));
                         tracing::info!(session_id = sid, "agent killed due to idle timeout");
+                        drop(guard);
+                        if let Some(tx) = &lifecycle_tx {
+                            let _ = tx.send(LifecycleEvent::AgentKilledIdle {
+                                session_id: sid.clone(),
+                            });
+                        }
                     }
                 });
                 session.quiescence_handle = Some(handle);

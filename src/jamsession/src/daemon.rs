@@ -161,8 +161,11 @@ impl Daemon {
             let sessions = sessions.clone();
             let state_path = self.state_path.clone();
             let factory = self.factory.clone();
+            let lifecycle_tx = self.lifecycle_tx.clone();
             tokio::spawn(async move {
-                if let Err(e) = handle_client(stream, state, sessions, state_path, factory).await {
+                if let Err(e) =
+                    handle_client(stream, state, sessions, state_path, factory, lifecycle_tx).await
+                {
                     tracing::error!("client connection error: {e}");
                 }
             });
@@ -182,7 +185,11 @@ async fn handle_client(
     sessions: Arc<SessionManager>,
     state_path: PathBuf,
     factory: Arc<dyn AgentFactory>,
+    lifecycle_tx: Option<LifecycleEventSender>,
 ) -> Result<(), agent_client_protocol::Error> {
+    if let Some(tx) = &lifecycle_tx {
+        let _ = tx.send(LifecycleEvent::ClientConnected);
+    }
     let (read_half, write_half) = stream.into_split();
     let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
 
@@ -354,11 +361,15 @@ async fn handle_client(
     // ANCHOR: client-disconnect
     // T037: Connection closed — trigger disconnect_client
     let session_id = active_session_id.lock().unwrap().clone();
-    if let Some(sid) = session_id {
+    if let Some(ref sid) = session_id {
         tracing::debug!(session_id = sid, "client disconnected");
-        sessions.disconnect_client(&sid);
+        sessions.disconnect_client(sid);
     }
     // ANCHOR_END: client-disconnect
+
+    if let Some(tx) = &lifecycle_tx {
+        let _ = tx.send(LifecycleEvent::ClientDisconnected { session_id });
+    }
 
     Ok(())
 }

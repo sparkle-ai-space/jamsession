@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use jamsession_test::{TestDaemon, TestDaemonConfig};
+use jamsession_test::{LifecycleEvent, TestDaemon, TestDaemonConfig, expect_test::expect};
 
 #[tokio::test]
 async fn smoke_list_sessions_empty() {
@@ -40,6 +40,18 @@ async fn basic_session_prompt_response() {
         .await;
 
     assert_eq!(result, "echo: hello");
+
+    daemon
+        .wait_for(
+            |e| matches!(e, LifecycleEvent::SessionCreated { .. }),
+            Duration::from_secs(2),
+        )
+        .await;
+
+    daemon.assert_lifecycle_events(expect![[r#"
+        Initialized
+        ClientConnected
+        SessionCreated($session0)"#]]);
 }
 
 #[tokio::test]
