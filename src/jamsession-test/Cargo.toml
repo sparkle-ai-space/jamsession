@@ -14,6 +14,11 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 tempfile = "3"
 
+[[bin]]
+name = "mock-agent"
+path = "src/bin/mock-agent.rs"
+
 [dev-dependencies]
-agent-client-protocol = "0.13.1"
 rhaicp = "2.1.0"
+serde_json = "1"
+tempfile = "3"
