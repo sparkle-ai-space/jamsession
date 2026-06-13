@@ -1535,7 +1535,6 @@ dependencies = [
  "clap",
  "dirs",
  "lazy_static",
- "nix",
  "pkg-config",
  "serde",
  "serde_json",

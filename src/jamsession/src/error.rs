@@ -22,10 +22,7 @@ pub enum Error {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(super) enum StateError {
-    #[error("failed to read state file: {0}")]
-    Read(std::io::Error),
-
+pub enum StateError {
     #[error("failed to write state file: {0}")]
     Write(std::io::Error),
 

@@ -42,60 +42,23 @@ The key invariant: **only the actor task reads or writes session state**. Everyt
 
 ## Message types
 
-The actor has two distinct enums: **`DaemonMessage`** (inputs that drive the actor) and **`DaemonEvent`** (outcomes emitted for observers).
+The actor has two distinct enums: **`DaemonMessage`** (inputs that drive the actor) and **`LifecycleEvent`** (outcomes emitted for observers).
 
 ### `DaemonMessage` — inputs to the actor
 
-```rust
-enum DaemonMessage {
-    /// Client requests: initialize, list, new, load, resume.
-    /// Each carries a oneshot::Sender for the reply.
-    Initialize { req, reply },
-    ListSessions { req, reply },
-    SessionNew { req, client_cx, reply },
-    SessionLoad { req, client_cx, reply },
-    SessionResume { req, client_cx, reply },
-
-    /// A message arrived from a client connection (bridged mode).
-    ClientMessage { session_id, dispatch },
-
-    /// A message arrived from an agent's stdio.
-    AgentMessage { session_id, dispatch },
-
-    /// A client disconnected (socket closed or superseded).
-    ClientDisconnected { session_id },
-
-    /// An agent process exited (expected or crash).
-    AgentExited { session_id },
-
-    /// Quiescence window elapsed (carries generation for staleness check).
-    AgentQuiescent { session_id, generation },
-
-    /// Idle timeout elapsed (carries generation for staleness check).
-    IdleTimeoutElapsed { session_id, generation },
-
-    /// Periodic working-directory health check fired.
-    CwdHealthCheck,
-}
+```{anchor}
+daemon-message
 ```
 
-### `DaemonEvent` — outcomes for observers
+**Key design constraint**: `send_request(...).block_task().await` can only be called from within `cx.spawn()` or a `connect_with` callback — NOT from the actor task. Therefore agent spawn + initialize + session/new must run in the client handler task ({anchor}`handle-session-new`). The actor receives the results as fire-and-forget registration messages (`SessionCreated`, `SessionReconnected`).
 
-```rust
-enum DaemonEvent {
-    Initialized,
-    ClientConnected,
-    ClientDisconnected { session_id: Option<String> },
-    SessionCreated { session_id },
-    SessionLoaded { session_id },
-    SessionResumed { session_id },
-    AgentLaunched { session_id },
-    AgentQuiescent { session_id },
-    AgentStopped { session_id },
-}
+### `LifecycleEvent` — outcomes for observers
+
+```{anchor}
+lifecycle-event
 ```
 
-The actor emits `DaemonEvent` values into a separate unbounded channel for subscribers (tests, tracing). These are purely observational — the actor never receives them back.
+The actor emits `LifecycleEvent` values into a separate unbounded channel for subscribers (tests, tracing). These are purely observational — the actor never receives them back.
 
 ## Fresh connection — new session (internal)
 
@@ -103,7 +66,7 @@ The actor emits `DaemonEvent` values into a separate unbounded channel for subsc
 sequenceDiagram
     participant CT as Client Task
     participant A as Actor
-    participant AT as Agent Task
+    participant Ag as Agent
 
     Note over CT: Client connects via Unix socket
 
@@ -113,21 +76,19 @@ sequenceDiagram
     CT->>A: ListSessions { reply }
     A-->>CT: sessions
 
-    CT->>A: NewSession { req, client_cx, reply }
-    Note over A: Spawn agent process
-    A->>AT: start agent task
-    AT->>A: AgentMessage { initialize response }
-    Note over A: Send session/new to agent
-    AT->>A: AgentMessage { session/new response }
-    Note over A: Record session, persist state
-    Note over A: Install bridge (client_cx ↔ agent)
-    A-->>CT: NewSessionResponse { session_id }
+    Note over CT: session/new received, runs in cx.spawn()
+    CT->>Ag: spawn_agent_connection + initialize_agent
+    CT->>Ag: new_session_on_agent
+    Ag-->>CT: sessionId
+    Note over CT: Install ClientForwarder + AgentForwarder
+    CT->>A: SessionCreated { session_id, cwd, client_cx, agent_cx }
+    Note over A: Persist state, store LiveSession
+    CT-->>CT: respond to client
 
-    Note over CT,AT: Bridge active: client ↔ actor ↔ agent
-
-    AT->>A: AgentMessage { notification }
-    Note over A: Buffer + forward to client_cx
+    Note over CT,Ag: Bridge active: client ↔ forwarder ↔ actor ↔ forwarder ↔ agent
 ```
+
+Source: {anchor}`handle-session-new`
 
 ## Reconnect — load session, agent dead (internal)
 
@@ -135,35 +96,41 @@ sequenceDiagram
 sequenceDiagram
     participant CT as Client Task
     participant A as Actor
-    participant AT as Agent Task
+    participant Ag as Agent
 
-    CT->>A: LoadSession { session_id, client_cx, reply }
-    Note over A: Session found, agent dead → spawn
-    A->>AT: start agent task
-    AT->>A: AgentMessage { initialize response }
-    Note over A: Send session/load to agent
-    AT->>A: AgentMessage { session/update notifications }
-    Note over A: Forward replay to client_cx
-    AT->>A: AgentMessage { session/load response }
-    Note over A: Install bridge
-    A-->>CT: LoadSessionResponse
+    Note over CT: session/load received, runs in cx.spawn()
+    CT->>A: QuerySessionState { session_id, reply }
+    A-->>CT: { agent_dead: true, cwd }
+    CT->>Ag: spawn + initialize
+    CT->>Ag: load_session_on_agent
+    Ag-->>CT: replay notifications
+    Note over CT: Forward replay to client, install forwarders
+    CT->>A: SessionReconnected { session_id, client_cx, agent_cx }
+    CT-->>CT: respond to client
 ```
+
+Source: {anchor}`handle-session-load`
 
 ## Reconnect — load session, agent alive (internal)
 
 ```mermaid
 sequenceDiagram
-    participant CT2 as Client Task (new)
+    participant CT as Client Task (new)
     participant A as Actor
-    participant CT1 as Client Task (old)
+    participant Ag as Agent
 
-    CT2->>A: LoadSession { session_id, client_cx, reply }
-    Note over A: Agent alive, disconnect old client
-    A-->>CT1: cancel (via oneshot)
-    Note over A: Replay from in-memory buffer to new client
-    Note over A: Re-wire bridge to new client_cx
-    A-->>CT2: LoadSessionResponse
+    Note over CT: session/load received
+    CT->>A: QuerySessionState { session_id, reply }
+    A-->>CT: { agent_dead: false }
+    Note over CT: Install ClientForwarder (no spawn)
+    CT->>A: SessionReconnected { session_id, client_cx, replay_to_client: true }
+    Note over A: Replay buffered notifications to new client_cx
+    CT-->>CT: respond to client
+
+    Note over CT,Ag: New client bridged to live agent
 ```
+
+Source: {anchor}`handle-session-load`
 
 ## Client disconnect and idle spin-down (internal)
 
@@ -173,56 +140,64 @@ sequenceDiagram
     participant A as Actor
     participant T as Timer
 
-    Note over CT: TCP/socket closes
+    Note over CT: TCP/socket closes (connect_to returns)
     CT->>A: ClientDisconnected { session_id }
-    Note over A: client_count → 0, start quiescence timer
+    Note over A: Drop client_cx, bump generation
+    Note over A: Spawn quiescence timer with current generation
 
-    T->>A: AgentQuiescent { session_id }
-    Note over A: No activity during window → start idle timer
+    T->>A: AgentQuiescent { session_id, generation }
+    Note over A: generation matches → Quiescent
+    Note over A: Spawn idle timer with same generation
 
-    T->>A: IdleTimeoutElapsed { session_id }
-    Note over A: Still no clients → kill agent, drop buffer
+    T->>A: IdleTimeoutElapsed { session_id, generation }
+    Note over A: generation matches → kill agent, clear buffer
 ```
 
-## Agent crash and respawn (internal)
+Source: {anchor}`disconnect-and-idle`
+
+## Agent crash detection (internal)
 
 ```mermaid
 sequenceDiagram
-    participant AT as Agent Task
+    participant Ag as Agent
     participant A as Actor
-    participant AT2 as Agent Task (new)
 
-    AT->>A: AgentExited { session_id }
-    Note over A: Unexpected exit, respawn_attempted = false
-    Note over A: Spawn new agent
-    A->>AT2: start agent task
-    AT2->>A: AgentMessage { initialize response }
-    Note over A: Send session/load
-    AT2->>A: AgentMessage { session/load response }
-    Note over A: Re-install bridge if client connected
+    Note over Ag: Process exits unexpectedly
+    Ag--xA: AgentExited { session_id }
+    Note over A: Mark AgentDead, clear buffer
 ```
+
+Source: {anchor}`handle-agent-exited`
+
+Note: respawn is not currently implemented in the actor (requires independent agent connections).
 
 ## Message flow through the bridge
 
-During normal operation, the actor routes messages bidirectionally:
+During normal operation, forwarders route messages through the actor:
 
 ```mermaid
 sequenceDiagram
-    participant C as Client (via client_cx)
+    participant C as Client
+    participant CF as ClientForwarder
     participant A as Actor
-    participant Ag as Agent (via agent task)
+    participant AF as AgentForwarder
+    participant Ag as Agent
 
-    C->>A: prompt/start [from client task]
-    A->>Ag: prompt/start [forwarded]
+    C->>CF: prompt/start [Dispatch]
+    CF->>A: ClientMessage { session_id, dispatch }
+    A->>Ag: agent_cx.send_proxied_message(dispatch)
 
-    Ag->>A: AgentMessage { session/update }
-    Note over A: Buffer notification
-    A->>C: session/update [forwarded to client_cx]
+    Ag->>AF: session/update [Dispatch]
+    AF->>A: AgentMessage { session_id, dispatch }
+    Note over A: Buffer notification, bump generation
+    A->>C: client_cx.send_proxied_message(dispatch)
 
-    Ag->>A: AgentMessage { prompt/end }
-    A->>C: prompt/end [forwarded]
-    Note over A: lifecycle → TurnComplete
+    Ag->>AF: prompt/end [Dispatch]
+    AF->>A: AgentMessage { session_id, dispatch }
+    A->>C: client_cx.send_proxied_message(dispatch)
 ```
+
+Source: {anchor}`route-messages`
 
 ## Design principles
 

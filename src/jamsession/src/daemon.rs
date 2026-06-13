@@ -102,7 +102,7 @@ impl Daemon {
             actor_tx.clone(),
         );
 
-        // CWD health check timer
+        // ANCHOR: cwd-health-check-timer
         {
             let tx = actor_tx.clone();
             tokio::spawn(async move {
@@ -112,6 +112,7 @@ impl Daemon {
                 }
             });
         }
+        // ANCHOR_END: cwd-health-check-timer
 
         // Spawn actor task
         tokio::spawn(async move {
@@ -139,6 +140,7 @@ impl Daemon {
             let _ = tx.send(LifecycleEvent::Initialized);
         }
 
+        // ANCHOR: accept-loop
         loop {
             let (stream, _) = listener.accept().await?;
             let tx = actor_tx.clone();
@@ -153,6 +155,7 @@ impl Daemon {
                 }
             });
         }
+        // ANCHOR_END: accept-loop
     }
 
     pub async fn shutdown(&self) {
@@ -181,6 +184,7 @@ async fn handle_client(
     Agent
         .builder()
         .name("jamsession-daemon")
+        // ANCHOR: handle-initialize
         .on_receive_request(
             {
                 let actor_tx = actor_tx.clone();
@@ -210,6 +214,8 @@ async fn handle_client(
             },
             on_receive_request!(),
         )
+        // ANCHOR_END: handle-initialize
+        // ANCHOR: handle-session-list
         .on_receive_request(
             {
                 let actor_tx = actor_tx.clone();
@@ -236,6 +242,8 @@ async fn handle_client(
             },
             on_receive_request!(),
         )
+        // ANCHOR_END: handle-session-list
+        // ANCHOR: dispatch-session-new
         .on_receive_request(
             {
                 let actor_tx = actor_tx.clone();
@@ -273,6 +281,8 @@ async fn handle_client(
             },
             on_receive_request!(),
         )
+        // ANCHOR_END: dispatch-session-new
+        // ANCHOR: dispatch-session-load
         .on_receive_request(
             {
                 let actor_tx = actor_tx.clone();
@@ -303,6 +313,7 @@ async fn handle_client(
             },
             on_receive_request!(),
         )
+        // ANCHOR_END: dispatch-session-load
         .on_receive_request(
             {
                 let actor_tx = actor_tx.clone();
@@ -336,6 +347,7 @@ async fn handle_client(
         .connect_to(transport)
         .await?;
 
+    // ANCHOR: client-disconnect
     let session_id = active_session_id.lock().unwrap().clone();
     if let Some(ref sid) = session_id {
         tracing::debug!(session_id = sid, "client disconnected");
@@ -347,6 +359,7 @@ async fn handle_client(
     if let Some(tx) = &lifecycle_tx {
         let _ = tx.send(LifecycleEvent::ClientDisconnected { session_id });
     }
+    // ANCHOR_END: client-disconnect
 
     Ok(())
 }
@@ -355,6 +368,7 @@ async fn handle_client(
 // Session handlers — run inside cx.spawn(...) so block_task() is safe
 // ---------------------------------------------------------------------------
 
+// ANCHOR: handle-session-new
 async fn handle_session_new(
     req: NewSessionRequest,
     client_cx: &ConnectionTo<agent_client_protocol::Client>,
@@ -401,7 +415,9 @@ async fn handle_session_new(
 
     Ok(NewSessionResponse::new(session_id))
 }
+// ANCHOR_END: handle-session-new
 
+// ANCHOR: handle-session-load
 async fn handle_session_load(
     req: LoadSessionRequest,
     client_cx: &ConnectionTo<agent_client_protocol::Client>,
@@ -468,6 +484,7 @@ async fn handle_session_load(
 
     Ok((LoadSessionResponse::new(), session_id))
 }
+// ANCHOR_END: handle-session-load
 
 async fn handle_session_resume(
     req: ResumeSessionRequest,

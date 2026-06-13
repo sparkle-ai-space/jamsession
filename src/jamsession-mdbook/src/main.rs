@@ -294,7 +294,7 @@ fn expand_block_anchors(
                 let url = anchor.github_url(config);
                 let lang = anchor.file_extension();
                 format!(
-                    "<figure>\n\n```{lang}\n{content}\n```\n\n<figcaption>\n\n[`{rel}:{start}-{end}`]({url})\n\n</figcaption>\n</figure>",
+                    "```{lang}\n{content}\n```\n\n<small>[`{rel}:{start}-{end}`]({url})</small>",
                     content = anchor.content,
                     start = anchor.line_start,
                     end = anchor.line_end,
@@ -354,7 +354,7 @@ mod tests {
         let output = expand_block_anchors(input, &anchors, &config);
         assert!(output.contains("```rs"));
         assert!(output.contains("fn foo()"));
-        assert!(output.contains("figcaption"));
+        assert!(output.contains("src/lib.rs:10-15"));
     }
 
     #[test]

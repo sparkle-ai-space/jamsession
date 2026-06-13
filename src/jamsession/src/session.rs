@@ -1,3 +1,4 @@
+// ANCHOR: lifecycle-event
 /// Events emitted by the daemon for observability and test synchronization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LifecycleEvent {
@@ -10,6 +11,7 @@ pub enum LifecycleEvent {
     AgentQuiescent { session_id: String },
     AgentKilledIdle { session_id: String },
 }
+// ANCHOR_END: lifecycle-event
 
 impl std::fmt::Display for LifecycleEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

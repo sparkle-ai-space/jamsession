@@ -166,14 +166,4 @@ impl AgentManager {
             .map_err(|e| Error::AgentSpawn(format!("agent session/load failed: {e}")))?;
         Ok(())
     }
-
-    async fn kill_agent(pid: u32) {
-        use nix::sys::signal::{Signal, kill};
-        use nix::unistd::Pid;
-
-        let pid = Pid::from_raw(pid as i32);
-        let _ = kill(pid, Signal::SIGTERM);
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let _ = kill(pid, Signal::SIGKILL);
-    }
 }

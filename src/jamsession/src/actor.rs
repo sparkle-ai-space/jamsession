@@ -18,6 +18,8 @@ use crate::state::{DaemonState, SessionRecord};
 // DaemonMessage — inputs to the actor
 // ---------------------------------------------------------------------------
 
+// ANCHOR: daemon-message
+#[allow(dead_code)]
 pub(super) enum DaemonMessage {
     /// Client sent `initialize` — resolve capabilities from cache or probe a temp agent.
     /// Reply carries the agent's advertised capabilities.
@@ -82,6 +84,7 @@ pub(super) enum DaemonMessage {
     /// Periodic sweep: remove sessions whose cwd no longer exists on disk.
     CwdHealthCheck,
 }
+// ANCHOR_END: daemon-message
 
 /// Info returned by QuerySessionState so the client task can decide
 /// whether to spawn a new agent or reuse the existing one.
@@ -101,6 +104,7 @@ pub(super) struct SessionLivenessInfo {
 ///                          ↑ (on_message / on_client_connect resets to Active)
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum LifecycleState {
     /// No agent process running. Next: spawn on demand.
     AgentDead,
@@ -116,6 +120,7 @@ enum LifecycleState {
     IdleTimerRunning,
 }
 
+#[allow(dead_code)]
 impl LifecycleState {
     fn on_message(self) -> Self {
         match self {
@@ -487,6 +492,7 @@ impl DaemonActor {
     // Message routing
     // -----------------------------------------------------------------------
 
+    // ANCHOR: route-messages
     fn route_client_to_agent(&self, session_id: &str, dispatch: Dispatch) {
         let Some(session) = self.sessions.get(session_id) else {
             tracing::warn!(session_id, "client message for unknown session");
@@ -524,10 +530,13 @@ impl DaemonActor {
         }
     }
 
+    // ANCHOR_END: route-messages
+
     // -----------------------------------------------------------------------
     // Disconnect and timers
     // -----------------------------------------------------------------------
 
+    // ANCHOR: disconnect-and-idle
     fn handle_client_disconnected(&mut self, session_id: &str) {
         let Some(session) = self.sessions.get_mut(session_id) else {
             return;
@@ -600,11 +609,14 @@ impl DaemonActor {
         });
     }
 
+    // ANCHOR_END: disconnect-and-idle
+
     // -----------------------------------------------------------------------
     // Agent exit (crash detection — respawn delegated back to client task
     // if one is connected; otherwise mark dead)
     // -----------------------------------------------------------------------
 
+    // ANCHOR: handle-agent-exited
     fn handle_agent_exited(&mut self, session_id: &str) {
         let Some(session) = self.sessions.get_mut(session_id) else {
             return;
@@ -620,10 +632,13 @@ impl DaemonActor {
         tracing::warn!(session_id, "agent exited unexpectedly");
     }
 
+    // ANCHOR_END: handle-agent-exited
+
     // -----------------------------------------------------------------------
     // CWD health check
     // -----------------------------------------------------------------------
 
+    // ANCHOR: cwd-health-check
     fn handle_cwd_health_check(&mut self) {
         let to_remove: Vec<String> = self
             .sessions
@@ -644,6 +659,7 @@ impl DaemonActor {
             let _ = self.state.save(&self.state_path);
         }
     }
+    // ANCHOR_END: cwd-health-check
 }
 
 // ---------------------------------------------------------------------------
