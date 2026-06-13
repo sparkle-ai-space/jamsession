@@ -179,169 +179,148 @@ async fn handle_client(
     let (read_half, write_half) = stream.into_split();
     let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
 
-    let active_session_id: Arc<std::sync::Mutex<Option<String>>> =
-        Arc::new(std::sync::Mutex::new(None));
+    let active_sessions: Arc<std::sync::Mutex<Vec<String>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
 
     Agent
         .builder()
         .name("jamsession-daemon")
         // ANCHOR: handle-initialize
         .on_receive_request(
-            {
+            async |req: InitializeRequest,
+                   responder: Responder<InitializeResponse>,
+                   cx: ConnectionTo<agent_client_protocol::Client>| {
                 let actor_tx = actor_tx.clone();
-                async move |req: InitializeRequest,
-                            responder: Responder<InitializeResponse>,
-                            cx: ConnectionTo<agent_client_protocol::Client>| {
-                    let actor_tx = actor_tx.clone();
-                    cx.spawn(async move {
-                        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                        let _ = actor_tx.send(DaemonMessage::Initialize {
-                            req,
-                            reply: reply_tx,
-                        });
-                        match reply_rx.await {
-                            Ok(Ok(response)) => responder.respond(response),
-                            Ok(Err(e)) => {
-                                responder.respond_with_error(agent_client_protocol::Error::from(&e))
-                            }
-                            Err(_) => responder.respond_with_error(
-                                agent_client_protocol::Error::internal_error()
-                                    .data("actor channel closed"),
-                            ),
+                cx.spawn(async move {
+                    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                    let _ = actor_tx.send(DaemonMessage::Initialize {
+                        req,
+                        reply: reply_tx,
+                    });
+                    match reply_rx.await {
+                        Ok(Ok(response)) => responder.respond(response),
+                        Ok(Err(e)) => {
+                            responder.respond_with_error(agent_client_protocol::Error::from(&e))
                         }
-                    })?;
-                    Ok(())
-                }
+                        Err(_) => responder.respond_with_error(
+                            agent_client_protocol::Error::internal_error()
+                                .data("actor channel closed"),
+                        ),
+                    }
+                })?;
+                Ok(())
             },
             on_receive_request!(),
         )
         // ANCHOR_END: handle-initialize
         // ANCHOR: handle-session-list
         .on_receive_request(
-            {
+            async |req: ListSessionsRequest,
+                   responder: Responder<ListSessionsResponse>,
+                   cx: ConnectionTo<agent_client_protocol::Client>| {
                 let actor_tx = actor_tx.clone();
-                async move |req: ListSessionsRequest,
-                            responder: Responder<ListSessionsResponse>,
-                            cx: ConnectionTo<agent_client_protocol::Client>| {
-                    let actor_tx = actor_tx.clone();
-                    cx.spawn(async move {
-                        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                        let _ = actor_tx.send(DaemonMessage::ListSessions {
-                            req,
-                            reply: reply_tx,
-                        });
-                        match reply_rx.await {
-                            Ok(response) => responder.respond(response),
-                            Err(_) => responder.respond_with_error(
-                                agent_client_protocol::Error::internal_error()
-                                    .data("actor channel closed"),
-                            ),
-                        }
-                    })?;
-                    Ok(())
-                }
+                cx.spawn(async move {
+                    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                    let _ = actor_tx.send(DaemonMessage::ListSessions {
+                        req,
+                        reply: reply_tx,
+                    });
+                    match reply_rx.await {
+                        Ok(response) => responder.respond(response),
+                        Err(_) => responder.respond_with_error(
+                            agent_client_protocol::Error::internal_error()
+                                .data("actor channel closed"),
+                        ),
+                    }
+                })?;
+                Ok(())
             },
             on_receive_request!(),
         )
         // ANCHOR_END: handle-session-list
         // ANCHOR: dispatch-session-new
         .on_receive_request(
-            {
+            async |req: NewSessionRequest,
+                   responder: Responder<NewSessionResponse>,
+                   cx: ConnectionTo<agent_client_protocol::Client>| {
                 let actor_tx = actor_tx.clone();
                 let factory = factory.clone();
-                let active_session_id = active_session_id.clone();
-                async move |req: NewSessionRequest,
-                            responder: Responder<NewSessionResponse>,
-                            cx: ConnectionTo<agent_client_protocol::Client>| {
-                    let actor_tx = actor_tx.clone();
-                    let factory = factory.clone();
-                    let active_session_id = active_session_id.clone();
-                    let cx2 = cx.clone();
-                    cx.spawn(async move {
-                        let result = handle_session_new(
-                            req,
-                            &cx2,
-                            &actor_tx,
-                            factory.as_ref(),
-                            send_guidelines,
-                        )
-                        .await;
-                        match result {
-                            Ok(response) => {
-                                let sid = response.session_id.0.to_string();
-                                *active_session_id.lock().unwrap() = Some(sid);
-                                responder.respond(response)
-                            }
-                            Err(e) => {
-                                responder.respond_with_error(agent_client_protocol::Error::from(&e))
-                            }
+                let active_sessions = active_sessions.clone();
+                let cx2 = cx.clone();
+                cx.spawn(async move {
+                    let result = handle_session_new(
+                        req,
+                        &cx2,
+                        &actor_tx,
+                        factory.as_ref(),
+                        send_guidelines,
+                    )
+                    .await;
+                    match result {
+                        Ok(response) => {
+                            let sid = response.session_id.0.to_string();
+                            active_sessions.lock().unwrap().push(sid);
+                            responder.respond(response)
                         }
-                    })?;
-                    Ok(())
-                }
+                        Err(e) => {
+                            responder.respond_with_error(agent_client_protocol::Error::from(&e))
+                        }
+                    }
+                })?;
+                Ok(())
             },
             on_receive_request!(),
         )
         // ANCHOR_END: dispatch-session-new
         // ANCHOR: dispatch-session-load
         .on_receive_request(
-            {
+            async |req: LoadSessionRequest,
+                   responder: Responder<LoadSessionResponse>,
+                   cx: ConnectionTo<agent_client_protocol::Client>| {
                 let actor_tx = actor_tx.clone();
                 let factory = factory.clone();
-                let active_session_id = active_session_id.clone();
-                async move |req: LoadSessionRequest,
-                            responder: Responder<LoadSessionResponse>,
-                            cx: ConnectionTo<agent_client_protocol::Client>| {
-                    let actor_tx = actor_tx.clone();
-                    let factory = factory.clone();
-                    let active_session_id = active_session_id.clone();
-                    let cx2 = cx.clone();
-                    cx.spawn(async move {
-                        let result =
-                            handle_session_load(req, &cx2, &actor_tx, factory.as_ref()).await;
-                        match result {
-                            Ok((response, sid)) => {
-                                *active_session_id.lock().unwrap() = Some(sid);
-                                responder.respond(response)
-                            }
-                            Err(e) => {
-                                responder.respond_with_error(agent_client_protocol::Error::from(&e))
-                            }
+                let active_sessions = active_sessions.clone();
+                let cx2 = cx.clone();
+                cx.spawn(async move {
+                    let result =
+                        handle_session_load(req, &cx2, &actor_tx, factory.as_ref()).await;
+                    match result {
+                        Ok((response, sid)) => {
+                            active_sessions.lock().unwrap().push(sid);
+                            responder.respond(response)
                         }
-                    })?;
-                    Ok(())
-                }
+                        Err(e) => {
+                            responder.respond_with_error(agent_client_protocol::Error::from(&e))
+                        }
+                    }
+                })?;
+                Ok(())
             },
             on_receive_request!(),
         )
         // ANCHOR_END: dispatch-session-load
         .on_receive_request(
-            {
+            async |req: ResumeSessionRequest,
+                   responder: Responder<ResumeSessionResponse>,
+                   cx: ConnectionTo<agent_client_protocol::Client>| {
                 let actor_tx = actor_tx.clone();
                 let factory = factory.clone();
-                let active_session_id = active_session_id.clone();
-                async move |req: ResumeSessionRequest,
-                            responder: Responder<ResumeSessionResponse>,
-                            cx: ConnectionTo<agent_client_protocol::Client>| {
-                    let actor_tx = actor_tx.clone();
-                    let factory = factory.clone();
-                    let active_session_id = active_session_id.clone();
-                    let cx2 = cx.clone();
-                    cx.spawn(async move {
-                        let result =
-                            handle_session_resume(req, &cx2, &actor_tx, factory.as_ref()).await;
-                        match result {
-                            Ok((response, sid)) => {
-                                *active_session_id.lock().unwrap() = Some(sid);
-                                responder.respond(response)
-                            }
-                            Err(e) => {
-                                responder.respond_with_error(agent_client_protocol::Error::from(&e))
-                            }
+                let active_sessions = active_sessions.clone();
+                let cx2 = cx.clone();
+                cx.spawn(async move {
+                    let result =
+                        handle_session_resume(req, &cx2, &actor_tx, factory.as_ref()).await;
+                    match result {
+                        Ok((response, sid)) => {
+                            active_sessions.lock().unwrap().push(sid);
+                            responder.respond(response)
                         }
-                    })?;
-                    Ok(())
-                }
+                        Err(e) => {
+                            responder.respond_with_error(agent_client_protocol::Error::from(&e))
+                        }
+                    }
+                })?;
+                Ok(())
             },
             on_receive_request!(),
         )
@@ -351,15 +330,16 @@ async fn handle_client(
     // ANCHOR_END: handle-client
 
     // ANCHOR: client-disconnect
-    let session_id = active_session_id.lock().unwrap().clone();
-    if let Some(ref sid) = session_id {
-        tracing::debug!(session_id = sid, "client disconnected");
+    let sessions = active_sessions.lock().unwrap().clone();
+    for sid in &sessions {
+        tracing::debug!(session_id = sid.as_str(), "client disconnected");
         let _ = actor_tx.send(DaemonMessage::ClientDisconnected {
             session_id: sid.clone(),
         });
     }
 
     if let Some(tx) = &lifecycle_tx {
+        let session_id = sessions.into_iter().last();
         let _ = tx.send(LifecycleEvent::ClientDisconnected { session_id });
     }
     // ANCHOR_END: client-disconnect
