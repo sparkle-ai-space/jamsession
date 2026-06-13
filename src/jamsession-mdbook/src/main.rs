@@ -121,34 +121,30 @@ impl Config {
 }
 
 /// Detect the GitHub repo and ref from the git working tree.
-/// Uses the current HEAD commit SHA for stable links, and parses the
-/// remote URL to determine the correct fork (not just the configured default).
+/// Uses the tracking remote to find the correct fork, and the current
+/// branch name for the ref (so links stay valid as commits move).
 fn detect_git_context(root: &Path, fallback: &PreprocessorConfig) -> (String, String) {
-    let git_ref = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(root)
-        .output()
-        .ok()
-        .and_then(|o| {
-            o.status
-                .success()
-                .then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        });
+    let tracking = tracking_remote_and_branch(root);
 
-    let remote_url = tracking_remote_url(root).or_else(|| origin_remote_url(root));
+    let (remote_url, branch) = match &tracking {
+        Some((url, branch)) => (Some(url.clone()), Some(branch.clone())),
+        None => (origin_remote_url(root), None),
+    };
 
     let repo = remote_url
         .and_then(|url| parse_github_repo(&url))
         .unwrap_or_else(|| fallback.github_repo.clone());
 
-    let git_ref = git_ref.unwrap_or_else(|| fallback.github_branch.clone());
+    let git_ref = branch.unwrap_or_else(|| fallback.github_branch.clone());
 
     (repo, git_ref)
 }
 
-/// Get the remote URL for the current branch's upstream tracking remote.
-fn tracking_remote_url(root: &Path) -> Option<String> {
-    let remote_name = std::process::Command::new("git")
+/// Get the remote URL and branch name for the current branch's upstream.
+/// Returns (remote_url, branch_name) — e.g. ("git@github.com:user/repo.git", "main").
+fn tracking_remote_and_branch(root: &Path) -> Option<(String, String)> {
+    // Returns something like "origin/main" or "nikomatsakis/conductor-like-arch"
+    let upstream = std::process::Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
         .current_dir(root)
         .output()
@@ -156,9 +152,9 @@ fn tracking_remote_url(root: &Path) -> Option<String> {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())?;
 
-    // upstream is like "origin/main" — extract the remote name
-    let remote = remote_name.split('/').next()?;
-    remote_url_by_name(root, remote)
+    let (remote, branch) = upstream.split_once('/')?;
+    let url = remote_url_by_name(root, remote)?;
+    Some((url, branch.to_string()))
 }
 
 /// Get the URL for the "origin" remote.
@@ -216,7 +212,7 @@ impl Anchor {
         let rel = self.relative_path(&config.root);
         format!(
             "https://github.com/{}/blob/{}/{}#L{}-L{}",
-            config.github_repo, config.github_branch, rel, self.line_start, self.line_end,
+            config.github_repo, config.github_ref, rel, self.line_start, self.line_end,
         )
     }
 
@@ -371,7 +367,7 @@ fn expand_block_anchors(
                 let url = anchor.github_url(config);
                 let lang = anchor.file_extension();
                 format!(
-                    "```{lang}\n{content}\n```\n\n<small>[`{rel}:{start}-{end}`]({url})</small>",
+                    "```{lang}\n{content}\n```\n\n*[`{rel}:{start}-{end}`]({url})*",
                     content = anchor.content,
                     start = anchor.line_start,
                     end = anchor.line_end,
@@ -395,7 +391,7 @@ mod tests {
             root: PathBuf::from("/project"),
             scan_dirs: vec![],
             github_repo: "user/repo".to_string(),
-            github_branch: "main".to_string(),
+            github_ref: "main".to_string(),
         }
     }
 
@@ -452,5 +448,29 @@ mod tests {
         ];
         let result = dedent(&lines);
         assert_eq!(result, "fn bar() {\n    42\n}");
+    }
+
+    #[test]
+    fn parse_github_repo_ssh() {
+        assert_eq!(
+            parse_github_repo("git@github.com:sparkle-ai-space/jamsession.git"),
+            Some("sparkle-ai-space/jamsession".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_github_repo_https() {
+        assert_eq!(
+            parse_github_repo("https://github.com/nikomatsakis/jamsession.git"),
+            Some("nikomatsakis/jamsession".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_github_repo_no_suffix() {
+        assert_eq!(
+            parse_github_repo("https://github.com/user/repo"),
+            Some("user/repo".to_string())
+        );
     }
 }

@@ -164,6 +164,7 @@ impl Daemon {
     }
 }
 
+// ANCHOR: handle-client
 async fn handle_client(
     stream: UnixStream,
     actor_tx: mpsc::UnboundedSender<DaemonMessage>,
@@ -346,6 +347,8 @@ async fn handle_client(
         )
         .connect_to(transport)
         .await?;
+
+    // ANCHOR_END: handle-client
 
     // ANCHOR: client-disconnect
     let session_id = active_session_id.lock().unwrap().clone();

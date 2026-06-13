@@ -42,7 +42,19 @@ The daemon listens on a Unix socket. Each incoming connection spawns a new clien
 accept-loop
 ```
 
-### 2. Initialize
+### 2. Client task (`handle_client`)
+
+Each client task establishes an ACP connection as the "Agent" side (because the daemon presents as an agent to the client). It registers typed request handlers for `Initialize`, `ListSessions`, `NewSession`, `LoadSession`, and `ResumeSession`. Each handler sends a message to the actor and awaits a reply via a oneshot channel.
+
+The key constraint: **`send_request(...).block_task().await` can only be called from within `cx.spawn()`** (the connection's task pool). So operations that need to talk to an agent (spawn, initialize, session/new) run inside `cx.spawn(...)`, while simple request/reply queries to the actor can use a oneshot directly.
+
+After a session is established, a `ClientForwarder` dynamic handler is installed. It captures all subsequent dispatches (prompts, tool calls, etc.) and routes them to the actor as `ClientMessage`. This is the bridge's client-side half.
+
+```{anchor}
+handle-client
+```
+
+### 3. Initialize
 
 The client sends `initialize` with its capabilities. The client task forwards this to the actor, which either returns cached capabilities or probes a temp agent (cold start, happens once).
 
@@ -50,7 +62,7 @@ The client sends `initialize` with its capabilities. The client task forwards th
 handle-initialize
 ```
 
-### 3. List sessions
+### 4. List sessions
 
 A simple request/reply through the actor — returns session records from the persistent state file.
 
@@ -58,7 +70,7 @@ A simple request/reply through the actor — returns session records from the pe
 handle-session-list
 ```
 
-### 4. Session/new dispatch
+### 5. Session/new dispatch
 
 The ACP `on_receive_request` handler for `NewSessionRequest`. It spawns a task via `cx.spawn()` (required for `block_task()`) and delegates to `handle_session_new`.
 
@@ -66,7 +78,7 @@ The ACP `on_receive_request` handler for `NewSessionRequest`. It spawns a task v
 dispatch-session-new
 ```
 
-### 5. Session/new implementation
+### 6. Session/new implementation
 
 The core logic: spawn the agent process, initialize the ACP protocol, send `session/new`, install forwarders, then register the session with the actor.
 
@@ -74,7 +86,7 @@ The core logic: spawn the agent process, initialize the ACP protocol, send `sess
 handle-session-new
 ```
 
-### 6. Message routing (bridged mode)
+### 7. Message routing (bridged mode)
 
 Once the session is established, all subsequent dispatches flow through forwarders → actor → `send_proxied_message`. The actor buffers notifications for future replay.
 
