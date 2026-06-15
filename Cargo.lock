@@ -1568,9 +1568,11 @@ name = "jamsession-test"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
+ "anyhow",
  "expect-test",
  "jamsession",
  "rhaicp",
+ "scope-tasks",
  "serde_json",
  "tempfile",
  "tokio",

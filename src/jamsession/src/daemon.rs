@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use tokio::net::UnixListener;
 
+use scope_tasks::scope;
+
 use crate::agent::AgentFactory;
 use crate::dispatcher::{self, Dispatcher, DispatcherMessage};
 use crate::error::Error;
@@ -135,20 +137,27 @@ impl Daemon {
             });
         }
 
-        // Run dispatcher
-        let mut dispatcher = Dispatcher::new(
-            state,
-            self.state_path.clone(),
-            self.factory.clone(),
-            self.idle_timeout,
-            self.quiescence_timeout,
-            self.send_guidelines,
-            self.lifecycle_tx.clone(),
-            dispatcher_tx,
-        );
+        // Run dispatcher inside a scope for structured task spawning
+        scope(
+            async |tasks| {
+                let mut dispatcher = Dispatcher::new(
+                    tasks,
+                    state,
+                    self.state_path.clone(),
+                    self.factory.clone(),
+                    self.idle_timeout,
+                    self.quiescence_timeout,
+                    self.send_guidelines,
+                    self.lifecycle_tx.clone(),
+                    dispatcher_tx,
+                );
 
-        dispatcher.run(dispatcher_rx).await;
-        Ok(())
+                dispatcher.run(dispatcher_rx).await;
+                Ok(())
+            },
+            scope_tasks::scope_hack!(),
+        )
+        .await
     }
 
     pub async fn shutdown(&self) {

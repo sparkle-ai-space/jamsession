@@ -39,6 +39,19 @@ impl<'scope, E: SpawnError> TaskSpawner<'scope, E> {
     }
 }
 
+/// This macro is used for the `hack` parameter of [`scope`].
+///
+/// It expands to `|f, t| Box::pin(f(t))`.
+///
+/// This is needed until [return-type notation](https://github.com/rust-lang/rust/issues/109417)
+/// is stabilized.
+#[macro_export]
+macro_rules! scope_hack {
+    () => {
+        |f, t| Box::pin(f(t))
+    };
+}
+
 /// Run `main_fn` as the foreground, with a concurrent task runner in the background.
 ///
 /// `main_fn` receives a `TaskSpawner` it can use to kick off concurrent work.
@@ -46,17 +59,30 @@ impl<'scope, E: SpawnError> TaskSpawner<'scope, E> {
 /// and `scope` returns the foreground's result.
 ///
 /// If any background task returns `Err`, the error propagates and the scope exits.
-pub async fn scope<'env, T, E>(
-    main_fn: impl AsyncFnOnce(TaskSpawner<'env, E>) -> Result<T, E> + 'env,
+///
+/// The `hack` parameter works around a compiler limitation: async closures
+/// don't reliably prove `Send` across higher-ranked lifetimes. The caller
+/// manually boxes the call, giving the compiler the proof it needs:
+///
+/// ```ignore
+/// scope(
+///     async |tasks| { /* ... */ },
+///     scope_hack!(),
+/// ).await
+/// ```
+pub async fn scope<'env, T, E, F>(
+    main_fn: F,
+    hack: impl FnOnce(F, TaskSpawner<'env, E>) -> Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'env>>,
 ) -> Result<T, E>
 where
     T: 'env,
     E: Send + 'env,
+    F: AsyncFnOnce(TaskSpawner<'env, E>) -> Result<T, E> + 'env,
 {
     let (tx, rx) = mpsc::unbounded_channel();
     let spawner = TaskSpawner { tx };
 
-    run_until(run_tasks(rx), main_fn(spawner)).await
+    run_until(run_tasks(rx), hack(main_fn, spawner)).await
 }
 
 /// Background runner: receives tasks from the channel and runs them concurrently
@@ -154,22 +180,25 @@ mod tests {
     async fn tasks_run_concurrently() {
         let counter = AtomicUsize::new(0);
 
-        let result: Result<(), TestError> = scope(async |spawner| {
-            spawner.spawn(async {
-                counter.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            })?;
-            spawner.spawn(async {
-                counter.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            })?;
+        let result: Result<(), TestError> = scope(
+            async |spawner| {
+                spawner.spawn(async {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                })?;
+                spawner.spawn(async {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                })?;
 
-            tokio::task::yield_now().await;
-            tokio::task::yield_now().await;
+                tokio::task::yield_now().await;
+                tokio::task::yield_now().await;
 
-            assert_eq!(counter.load(Ordering::Relaxed), 2);
-            Ok(())
-        })
+                assert_eq!(counter.load(Ordering::Relaxed), 2);
+                Ok(())
+            },
+            scope_hack!(),
+        )
         .await;
 
         assert!(result.is_ok());
@@ -179,17 +208,20 @@ mod tests {
     async fn foreground_exit_cancels_inflight_tasks() {
         let counter = AtomicUsize::new(0);
 
-        let result: Result<&str, TestError> = scope(async |spawner| {
-            spawner.spawn(async {
-                loop {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                    counter.fetch_add(1, Ordering::Relaxed);
-                }
-            })?;
+        let result: Result<&str, TestError> = scope(
+            async |spawner| {
+                spawner.spawn(async {
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                })?;
 
-            tokio::time::sleep(Duration::from_millis(30)).await;
-            Ok("done")
-        })
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                Ok("done")
+            },
+            scope_hack!(),
+        )
         .await;
 
         assert_eq!(result.unwrap(), "done");
@@ -205,12 +237,15 @@ mod tests {
 
     #[tokio::test]
     async fn task_error_propagates() {
-        let result: Result<(), TestError> = scope(async |spawner| {
-            spawner.spawn(async { Err(TestError::Task("boom".into())) })?;
+        let result: Result<(), TestError> = scope(
+            async |spawner| {
+                spawner.spawn(async { Err(TestError::Task("boom".into())) })?;
 
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            Ok(())
-        })
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                Ok(())
+            },
+            scope_hack!(),
+        )
         .await;
 
         assert_eq!(result, Err(TestError::Task("boom".into())));
@@ -221,13 +256,16 @@ mod tests {
         let captured_spawner: Arc<std::sync::Mutex<Option<TaskSpawner<'static, TestError>>>> =
             Default::default();
 
-        let _: Result<(), TestError> = scope({
-            let captured_spawner = captured_spawner.clone();
-            async move |spawner| {
-                *captured_spawner.lock().unwrap() = Some(spawner.clone());
-                Ok(())
-            }
-        })
+        let _: Result<(), TestError> = scope(
+            {
+                let captured_spawner = captured_spawner.clone();
+                async move |spawner| {
+                    *captured_spawner.lock().unwrap() = Some(spawner.clone());
+                    Ok(())
+                }
+            },
+            scope_hack!(),
+        )
         .await;
 
         let spawner = captured_spawner.lock().unwrap().take().unwrap();
@@ -240,19 +278,22 @@ mod tests {
         let data = vec![1u32, 2, 3];
         let sum = AtomicUsize::new(0);
 
-        let result: Result<usize, TestError> = scope(async |spawner| {
-            let sum = &sum;
-            for item in &data {
-                let item = *item;
-                spawner.spawn(async move {
-                    sum.fetch_add(item as usize, Ordering::Relaxed);
-                    Ok(())
-                })?;
-            }
-            tokio::task::yield_now().await;
-            tokio::task::yield_now().await;
-            Ok(sum.load(Ordering::Relaxed))
-        })
+        let result: Result<usize, TestError> = scope(
+            async |spawner| {
+                let sum = &sum;
+                for item in &data {
+                    let item = *item;
+                    spawner.spawn(async move {
+                        sum.fetch_add(item as usize, Ordering::Relaxed);
+                        Ok(())
+                    })?;
+                }
+                tokio::task::yield_now().await;
+                tokio::task::yield_now().await;
+                Ok(sum.load(Ordering::Relaxed))
+            },
+            scope_hack!(),
+        )
         .await;
 
         assert_eq!(result.unwrap(), 6);
@@ -262,16 +303,19 @@ mod tests {
     async fn many_tasks_complete() {
         let counter = AtomicUsize::new(0);
 
-        let result: Result<usize, TestError> = scope(async |spawner| {
-            for _ in 0..100 {
-                spawner.spawn(async {
-                    counter.fetch_add(1, Ordering::Relaxed);
-                    Ok(())
-                })?;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            Ok(counter.load(Ordering::Relaxed))
-        })
+        let result: Result<usize, TestError> = scope(
+            async |spawner| {
+                for _ in 0..100 {
+                    spawner.spawn(async {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                        Ok(())
+                    })?;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                Ok(counter.load(Ordering::Relaxed))
+            },
+            scope_hack!(),
+        )
         .await;
 
         assert_eq!(result.unwrap(), 100);

@@ -12,6 +12,7 @@ use agent_client_protocol::{
     Agent, ByteStreams, Client, Dispatch, DynConnectTo, HandleDispatchFrom, Handled, Responder,
 };
 use chrono::Utc;
+use scope_tasks::TaskSpawner;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -47,15 +48,12 @@ pub(super) enum DispatcherMessage {
         outgoing_tx: mpsc::UnboundedSender<Dispatch>,
         session_id: SessionId,
         client_id: ClientId,
+        cwd: PathBuf,
         replay_notifications: Vec<serde_json::Value>,
+        responder: AgentReadyResponder,
     },
     AgentCapabilities {
         capabilities: InitializeResponse,
-    },
-    AgentSpawnFailed {
-        client_id: ClientId,
-        agent_id: AgentId,
-        error: Error,
     },
     AgentDisconnected {
         agent_id: AgentId,
@@ -125,22 +123,27 @@ struct AgentHandle {
 }
 
 // ---------------------------------------------------------------------------
-// Dispatcher
+// AgentReadyResponder
 // ---------------------------------------------------------------------------
 
-enum PendingResponse {
+enum AgentReadyResponder {
     NewSession(Responder<NewSessionResponse>),
     LoadSession(Responder<LoadSessionResponse>),
     ResumeSession(Responder<ResumeSessionResponse>),
 }
 
-pub(super) struct Dispatcher {
+// ---------------------------------------------------------------------------
+// Dispatcher
+// ---------------------------------------------------------------------------
+
+
+pub(super) struct Dispatcher<'scope> {
+    tasks: TaskSpawner<'scope, crate::error::Error>,
     clients: HashMap<ClientId, ClientHandle>,
     agents: HashMap<AgentId, AgentHandle>,
     sessions: HashMap<SessionId, Session>,
     client_to_session: HashMap<ClientId, SessionId>,
     agent_to_session: HashMap<AgentId, SessionId>,
-    pending_responses: HashMap<AgentId, PendingResponse>,
     state: DaemonState,
     state_path: PathBuf,
     capabilities: Option<InitializeResponse>,
@@ -153,9 +156,9 @@ pub(super) struct Dispatcher {
     next_agent_id: u64,
 }
 
-#[allow(unused_must_use)]
-impl Dispatcher {
+impl<'scope> Dispatcher<'scope> {
     pub(super) fn new(
+        tasks: TaskSpawner<'scope, crate::error::Error>,
         state: DaemonState,
         state_path: PathBuf,
         factory: Arc<dyn AgentFactory>,
@@ -166,12 +169,12 @@ impl Dispatcher {
         dispatcher_tx: mpsc::UnboundedSender<DispatcherMessage>,
     ) -> Self {
         let mut dispatcher = Self {
+            tasks,
             clients: HashMap::new(),
             agents: HashMap::new(),
             sessions: HashMap::new(),
             client_to_session: HashMap::new(),
             agent_to_session: HashMap::new(),
-            pending_responses: HashMap::new(),
             state: state.clone(),
             state_path,
             capabilities: None,
@@ -230,40 +233,22 @@ impl Dispatcher {
                 outgoing_tx,
                 session_id,
                 client_id,
+                cwd,
                 replay_notifications,
+                responder,
             } => {
                 self.handle_agent_ready(
                     agent_id,
                     outgoing_tx,
                     session_id,
                     client_id,
+                    cwd,
                     replay_notifications,
+                    responder,
                 );
             }
             DispatcherMessage::AgentCapabilities { capabilities } => {
                 self.capabilities = Some(capabilities);
-            }
-            DispatcherMessage::AgentSpawnFailed {
-                client_id: _,
-                agent_id,
-                error,
-            } => {
-                tracing::error!(?error, "agent spawn failed");
-                if let Some(pending) = self.pending_responses.remove(&agent_id) {
-                    let err =
-                        agent_client_protocol::Error::internal_error().data(error.to_string());
-                    match pending {
-                        PendingResponse::NewSession(r) => {
-                            let _ = r.respond_with_error(err);
-                        }
-                        PendingResponse::LoadSession(r) => {
-                            let _ = r.respond_with_error(err);
-                        }
-                        PendingResponse::ResumeSession(r) => {
-                            let _ = r.respond_with_error(err);
-                        }
-                    }
-                }
             }
             DispatcherMessage::AgentDisconnected { agent_id } => {
                 self.handle_agent_disconnected(agent_id);
@@ -349,7 +334,9 @@ impl Dispatcher {
         outgoing_tx: mpsc::UnboundedSender<Dispatch>,
         session_id: SessionId,
         client_id: ClientId,
+        cwd: PathBuf,
         replay_notifications: Vec<serde_json::Value>,
+        responder: AgentReadyResponder,
     ) {
         self.agents.insert(agent_id, AgentHandle { outgoing_tx });
         self.agent_to_session.insert(agent_id, session_id.clone());
@@ -367,14 +354,9 @@ impl Dispatcher {
                 session.buffer = replay_notifications;
             }
         } else {
-            // New session — record needs cwd from the request.
-            // The agent_pipe passes it through the session_id (we derive cwd from
-            // the AgentSpawnRequest). For now, we save with a placeholder and the
-            // actual cwd comes from the NewSessionRequest we already validated.
-            // We'll fix this by passing cwd in the AgentReady message.
             let record = SessionRecord {
                 session_id: session_id.clone(),
-                cwd: PathBuf::from("/tmp"),
+                cwd,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             };
@@ -398,35 +380,32 @@ impl Dispatcher {
 
         self.client_to_session.insert(client_id, session_id.clone());
 
-        // Fulfill pending responder
-        if let Some(pending) = self.pending_responses.remove(&agent_id) {
-            match pending {
-                PendingResponse::NewSession(responder) => {
-                    let _ = responder.respond(NewSessionResponse::new(session_id.clone()));
-                    if is_new {
-                        self.emit(LifecycleEvent::SessionCreated { session_id });
-                    }
+        match responder {
+            AgentReadyResponder::NewSession(r) => {
+                let _ = r.respond(NewSessionResponse::new(session_id.clone()));
+                if is_new {
+                    self.emit(LifecycleEvent::SessionCreated { session_id });
                 }
-                PendingResponse::LoadSession(responder) => {
-                    if let Some(session) = self.sessions.get(&session_id)
-                        && let Some(client) = self.clients.get(&client_id)
-                    {
-                        for msg in &session.buffer {
-                            if let Ok(untyped) = serde_json::from_value::<
-                                agent_client_protocol::UntypedMessage,
-                            >(msg.clone())
-                            {
-                                let _ = client.outgoing_tx.send(Dispatch::Notification(untyped));
-                            }
+            }
+            AgentReadyResponder::LoadSession(r) => {
+                if let Some(session) = self.sessions.get(&session_id)
+                    && let Some(client) = self.clients.get(&client_id)
+                {
+                    for msg in &session.buffer {
+                        if let Ok(untyped) = serde_json::from_value::<
+                            agent_client_protocol::UntypedMessage,
+                        >(msg.clone())
+                        {
+                            let _ = client.outgoing_tx.send(Dispatch::Notification(untyped));
                         }
                     }
-                    let _ = responder.respond(LoadSessionResponse::new());
-                    self.emit(LifecycleEvent::SessionLoaded { session_id });
                 }
-                PendingResponse::ResumeSession(responder) => {
-                    let _ = responder.respond(ResumeSessionResponse::new());
-                    self.emit(LifecycleEvent::SessionResumed { session_id });
-                }
+                let _ = r.respond(LoadSessionResponse::new());
+                self.emit(LifecycleEvent::SessionLoaded { session_id });
+            }
+            AgentReadyResponder::ResumeSession(r) => {
+                let _ = r.respond(ResumeSessionResponse::new());
+                self.emit(LifecycleEvent::SessionResumed { session_id });
             }
         }
     }
@@ -663,25 +642,17 @@ impl Dispatcher {
         let agent_id = self.generate_agent_id();
         let send_guidelines = self.send_guidelines;
 
-        // Store responder — will be fulfilled when AgentReady arrives
-        self.pending_responses
-            .insert(agent_id, PendingResponse::NewSession(responder));
-
         let transport = match factory.create_transport("", &req.cwd, &req.mcp_servers) {
             Ok(t) => t,
             Err(e) => {
-                if let Some(PendingResponse::NewSession(r)) =
-                    self.pending_responses.remove(&agent_id)
-                {
-                    r.respond_with_error(
-                        agent_client_protocol::Error::internal_error().data(e.to_string()),
-                    );
-                }
+                let _ = responder.respond_with_error(
+                    agent_client_protocol::Error::internal_error().data(e.to_string()),
+                );
                 return;
             }
         };
 
-        tokio::spawn(async move {
+        let _ = self.tasks.spawn(async move {
             agent_pipe(
                 transport,
                 dispatcher_tx,
@@ -694,8 +665,10 @@ impl Dispatcher {
                     },
                     send_guidelines,
                 },
+                AgentReadyResponder::NewSession(responder),
             )
             .await;
+            Ok(())
         });
     }
 
@@ -727,24 +700,17 @@ impl Dispatcher {
             let dispatcher_tx = self.dispatcher_tx.clone();
             let agent_id = self.generate_agent_id();
 
-            self.pending_responses
-                .insert(agent_id, PendingResponse::LoadSession(responder));
-
             let transport = match factory.create_transport(&session_id, &cwd, &req.mcp_servers) {
                 Ok(t) => t,
                 Err(e) => {
-                    if let Some(PendingResponse::LoadSession(r)) =
-                        self.pending_responses.remove(&agent_id)
-                    {
-                        r.respond_with_error(
-                            agent_client_protocol::Error::internal_error().data(e.to_string()),
-                        );
-                    }
+                    let _ = responder.respond_with_error(
+                        agent_client_protocol::Error::internal_error().data(e.to_string()),
+                    );
                     return;
                 }
             };
 
-            tokio::spawn(async move {
+            let _ = self.tasks.spawn(async move {
                 agent_pipe(
                     transport,
                     dispatcher_tx,
@@ -758,8 +724,10 @@ impl Dispatcher {
                         },
                         send_guidelines: false,
                     },
+                    AgentReadyResponder::LoadSession(responder),
                 )
                 .await;
+                Ok(())
             });
         } else {
             // Agent alive: replay buffer to new client, respond immediately
@@ -814,24 +782,17 @@ impl Dispatcher {
             let dispatcher_tx = self.dispatcher_tx.clone();
             let agent_id = self.generate_agent_id();
 
-            self.pending_responses
-                .insert(agent_id, PendingResponse::ResumeSession(responder));
-
             let transport = match factory.create_transport(&session_id, &cwd, &req.mcp_servers) {
                 Ok(t) => t,
                 Err(e) => {
-                    if let Some(PendingResponse::ResumeSession(r)) =
-                        self.pending_responses.remove(&agent_id)
-                    {
-                        r.respond_with_error(
-                            agent_client_protocol::Error::internal_error().data(e.to_string()),
-                        );
-                    }
+                    let _ = responder.respond_with_error(
+                        agent_client_protocol::Error::internal_error().data(e.to_string()),
+                    );
                     return;
                 }
             };
 
-            tokio::spawn(async move {
+            let _ = self.tasks.spawn(async move {
                 agent_pipe(
                     transport,
                     dispatcher_tx,
@@ -845,8 +806,10 @@ impl Dispatcher {
                         },
                         send_guidelines: false,
                     },
+                    AgentReadyResponder::ResumeSession(responder),
                 )
                 .await;
+                Ok(())
             });
         } else {
             // Agent alive: just wire client to session (no replay for resume)
@@ -1066,24 +1029,28 @@ async fn agent_pipe(
     transport: DynConnectTo<Client>,
     dispatcher_tx: mpsc::UnboundedSender<DispatcherMessage>,
     spawn_request: AgentSpawnRequest,
+    responder: AgentReadyResponder,
 ) {
     let agent_id = spawn_request.agent_id;
     let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<Dispatch>();
+    let responder_slot: Arc<std::sync::Mutex<Option<AgentReadyResponder>>> =
+        Arc::new(std::sync::Mutex::new(Some(responder)));
 
     let result = Client
         .builder()
         .name("jamsession-daemon-agent")
         .connect_with(transport, {
             let dispatcher_tx = dispatcher_tx.clone();
+            let responder_slot = responder_slot.clone();
             async move |cx: agent_client_protocol::ConnectionTo<agent_client_protocol::Agent>| {
                 cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
                     .block_task()
                     .await?;
 
                 match spawn_request.request {
-                    SessionRequest::New { cwd, mcp_servers } => {
+                    SessionRequest::New { ref cwd, ref mcp_servers } => {
                         let resp = cx
-                            .send_request(NewSessionRequest::new(&cwd).mcp_servers(mcp_servers))
+                            .send_request(NewSessionRequest::new(cwd).mcp_servers(mcp_servers.clone()))
                             .block_task()
                             .await?;
 
@@ -1112,18 +1079,21 @@ async fn agent_pipe(
                         })?
                         .run_indefinitely();
 
+                        let responder = responder_slot.lock().unwrap().take().unwrap();
                         let _ = dispatcher_tx.send(DispatcherMessage::AgentReady {
                             agent_id,
                             outgoing_tx,
                             session_id,
                             client_id: spawn_request.client_id,
+                            cwd: cwd.clone(),
                             replay_notifications: Vec::new(),
+                            responder,
                         });
                     }
                     SessionRequest::Load {
-                        session_id,
-                        cwd,
-                        mcp_servers,
+                        ref session_id,
+                        ref cwd,
+                        ref mcp_servers,
                     } => {
                         let replay_buffer: Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
                             Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1137,8 +1107,8 @@ async fn agent_pipe(
                         .run_indefinitely();
 
                         cx.send_request(
-                            LoadSessionRequest::new(AcpSessionId::new(session_id.as_str()), &cwd)
-                                .mcp_servers(mcp_servers),
+                            LoadSessionRequest::new(AcpSessionId::new(session_id.as_str()), cwd)
+                                .mcp_servers(mcp_servers.clone()),
                         )
                         .block_task()
                         .await?;
@@ -1154,12 +1124,15 @@ async fn agent_pipe(
                         .run_indefinitely();
 
                         let replay = replay_buffer.lock().unwrap().clone();
+                        let responder = responder_slot.lock().unwrap().take().unwrap();
                         let _ = dispatcher_tx.send(DispatcherMessage::AgentReady {
                             agent_id,
                             outgoing_tx,
-                            session_id,
+                            session_id: session_id.clone(),
                             client_id: spawn_request.client_id,
+                            cwd: cwd.clone(),
                             replay_notifications: replay,
+                            responder,
                         });
                     }
                 }
@@ -1174,11 +1147,14 @@ async fn agent_pipe(
 
     if let Err(e) = result {
         tracing::error!(agent_id, error = %e, "agent pipe error");
-        let _ = dispatcher_tx.send(DispatcherMessage::AgentSpawnFailed {
-            client_id: spawn_request.client_id,
-            agent_id,
-            error: Error::AgentSpawn(e.to_string()),
-        });
+        if let Some(responder) = responder_slot.lock().unwrap().take() {
+            let err = agent_client_protocol::Error::internal_error().data(e.to_string());
+            match responder {
+                AgentReadyResponder::NewSession(r) => { let _ = r.respond_with_error(err); }
+                AgentReadyResponder::LoadSession(r) => { let _ = r.respond_with_error(err); }
+                AgentReadyResponder::ResumeSession(r) => { let _ = r.respond_with_error(err); }
+            }
+        }
     }
 
     let _ = dispatcher_tx.send(DispatcherMessage::AgentDisconnected { agent_id });

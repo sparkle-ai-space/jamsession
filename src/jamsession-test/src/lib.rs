@@ -82,7 +82,7 @@ impl Default for TestDaemonConfig {
 pub struct TestDaemon {
     _temp_dir: tempfile::TempDir,
     socket_path: PathBuf,
-    _daemon_handle: tokio::task::JoinHandle<()>,
+    _daemon_handle: tokio::task::JoinHandle<Result<(), jamsession::error::Error>>,
     _drain_handle: tokio::task::JoinHandle<()>,
     events: Arc<Mutex<Vec<LifecycleEvent>>>,
     notify: Arc<tokio::sync::Notify>,
@@ -110,7 +110,7 @@ impl TestDaemon {
                     .with_quiescence_timeout(Duration::from_millis(10))
                     .with_send_guidelines(false)
                     .with_lifecycle_events(lifecycle_tx);
-            let _ = daemon.run().await;
+            daemon.run().await
         });
 
         let events: Arc<Mutex<Vec<LifecycleEvent>>> = Arc::new(Mutex::new(Vec::new()));
