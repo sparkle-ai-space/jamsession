@@ -1,5 +1,3 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -66,10 +64,6 @@ impl DaemonState {
         Ok(())
     }
 
-    pub(super) fn find_session(&self, session_id: &str) -> Option<&SessionRecord> {
-        self.sessions.iter().find(|s| s.session_id == session_id)
-    }
-
     pub(super) fn list_sessions_by_cwd(&self, cwd: Option<&Path>) -> Vec<&SessionRecord> {
         match cwd {
             Some(cwd) => self.sessions.iter().filter(|s| s.cwd == cwd).collect(),
@@ -83,19 +77,6 @@ impl DaemonState {
 
     pub(super) fn remove_session(&mut self, session_id: &str) {
         self.sessions.retain(|s| s.session_id != session_id);
-    }
-}
-
-impl CachedCapabilities {
-    pub(super) fn hash_capabilities(capabilities: &serde_json::Value) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        let canonical = serde_json::to_string(capabilities).unwrap_or_default();
-        canonical.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    pub(super) fn matches(&self, capabilities: &serde_json::Value) -> bool {
-        Self::hash_capabilities(capabilities) == self.client_capabilities_hash
     }
 }
 
@@ -165,19 +146,5 @@ mod tests {
         let state = DaemonState::load(&path);
         assert_eq!(state.version, 1);
         assert!(state.sessions.is_empty());
-    }
-
-    #[test]
-    fn capabilities_cache_hit_and_miss() {
-        let caps_a = serde_json::json!({"fs": {"readTextFile": true}});
-        let caps_b = serde_json::json!({"fs": {"readTextFile": false}});
-
-        let cached = CachedCapabilities {
-            client_capabilities_hash: CachedCapabilities::hash_capabilities(&caps_a),
-            response: serde_json::json!({"protocolVersion": 1}),
-        };
-
-        assert!(cached.matches(&caps_a));
-        assert!(!cached.matches(&caps_b));
     }
 }

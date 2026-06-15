@@ -53,7 +53,7 @@ pub(super) enum DispatcherMessage {
         responder: AgentReadyResponder,
     },
     AgentCapabilities {
-        capabilities: InitializeResponse,
+        capabilities: Box<InitializeResponse>,
     },
     AgentDisconnected {
         agent_id: AgentId,
@@ -100,7 +100,6 @@ enum LifecycleState {
 // ---------------------------------------------------------------------------
 
 struct Session {
-    session_id: SessionId,
     agent_id: AgentId,
     client_ids: Vec<ClientId>,
     buffer: Vec<serde_json::Value>,
@@ -126,7 +125,8 @@ struct AgentHandle {
 // AgentReadyResponder
 // ---------------------------------------------------------------------------
 
-enum AgentReadyResponder {
+#[expect(clippy::enum_variant_names)]
+pub(super) enum AgentReadyResponder {
     NewSession(Responder<NewSessionResponse>),
     LoadSession(Responder<LoadSessionResponse>),
     ResumeSession(Responder<ResumeSessionResponse>),
@@ -156,6 +156,7 @@ pub(super) struct Dispatcher<'scope> {
 }
 
 impl<'scope> Dispatcher<'scope> {
+    #[expect(clippy::too_many_arguments)]
     pub(super) fn new(
         tasks: TaskSpawner<'scope, crate::error::Error>,
         state: DaemonState,
@@ -195,7 +196,6 @@ impl<'scope> Dispatcher<'scope> {
                 self.sessions.insert(
                     record.session_id.clone(),
                     Session {
-                        session_id: record.session_id.clone(),
                         agent_id: 0,
                         client_ids: Vec::new(),
                         buffer: Vec::new(),
@@ -247,7 +247,7 @@ impl<'scope> Dispatcher<'scope> {
                 );
             }
             DispatcherMessage::AgentCapabilities { capabilities } => {
-                self.capabilities = Some(capabilities);
+                self.capabilities = Some(*capabilities);
             }
             DispatcherMessage::AgentDisconnected { agent_id } => {
                 self.handle_agent_disconnected(agent_id);
@@ -327,6 +327,7 @@ impl<'scope> Dispatcher<'scope> {
     // Agent ready
     // -----------------------------------------------------------------------
 
+    #[expect(clippy::too_many_arguments)]
     fn handle_agent_ready(
         &mut self,
         agent_id: AgentId,
@@ -365,7 +366,6 @@ impl<'scope> Dispatcher<'scope> {
             self.sessions.insert(
                 session_id.clone(),
                 Session {
-                    session_id: session_id.clone(),
                     agent_id,
                     client_ids: vec![client_id],
                     buffer: replay_notifications,
@@ -498,7 +498,7 @@ impl<'scope> Dispatcher<'scope> {
         responder: Responder<InitializeResponse>,
     ) {
         if let Some(cached) = &self.capabilities {
-            responder.respond(cached.clone());
+            let _ = responder.respond(cached.clone());
             return;
         }
 
@@ -511,7 +511,7 @@ impl<'scope> Dispatcher<'scope> {
             let transport = match factory.create_transport("", std::path::Path::new("/"), &[]) {
                 Ok(t) => t,
                 Err(e) => {
-                    responder.respond_with_error(
+                    let _ = responder.respond_with_error(
                         agent_client_protocol::Error::internal_error().data(e.to_string()),
                     );
                     return;
@@ -540,12 +540,12 @@ impl<'scope> Dispatcher<'scope> {
             match result {
                 Ok(response) => {
                     let _ = dispatcher_tx.send(DispatcherMessage::AgentCapabilities {
-                        capabilities: response.clone(),
+                        capabilities: Box::new(response.clone()),
                     });
-                    responder.respond(response);
+                    let _ = responder.respond(response);
                 }
                 Err(e) => {
-                    responder.respond_with_error(e);
+                    let _ = responder.respond_with_error(e);
                 }
             }
         });
@@ -568,7 +568,7 @@ impl<'scope> Dispatcher<'scope> {
                     .updated_at(s.updated_at.to_rfc3339())
             })
             .collect();
-        responder.respond(ListSessionsResponse::new(session_infos));
+        let _ = responder.respond(ListSessionsResponse::new(session_infos));
     }
 
     // -----------------------------------------------------------------------
@@ -582,7 +582,7 @@ impl<'scope> Dispatcher<'scope> {
         responder: Responder<NewSessionResponse>,
     ) {
         if !req.cwd.is_absolute() || !req.cwd.exists() {
-            responder.respond_with_error(
+            let _ = responder.respond_with_error(
                 agent_client_protocol::Error::invalid_params()
                     .data(format!("invalid cwd: {}", req.cwd.display())),
             );
@@ -637,7 +637,7 @@ impl<'scope> Dispatcher<'scope> {
         let session_id = req.session_id.0.to_string();
 
         let Some(session) = self.sessions.get(&session_id) else {
-            responder.respond_with_error(
+            let _ = responder.respond_with_error(
                 agent_client_protocol::Error::invalid_params()
                     .data(format!("session not found: {session_id}")),
             );
@@ -702,7 +702,7 @@ impl<'scope> Dispatcher<'scope> {
                 session.generation += 1;
             }
 
-            responder.respond(LoadSessionResponse::new());
+            let _ = responder.respond(LoadSessionResponse::new());
         }
     }
 
@@ -719,7 +719,7 @@ impl<'scope> Dispatcher<'scope> {
         let session_id = req.session_id.0.to_string();
 
         let Some(session) = self.sessions.get(&session_id) else {
-            responder.respond_with_error(
+            let _ = responder.respond_with_error(
                 agent_client_protocol::Error::invalid_params()
                     .data(format!("session not found: {session_id}")),
             );
@@ -773,7 +773,7 @@ impl<'scope> Dispatcher<'scope> {
                 session.generation += 1;
             }
 
-            responder.respond(ResumeSessionResponse::new());
+            let _ = responder.respond(ResumeSessionResponse::new());
         }
     }
 
