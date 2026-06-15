@@ -8,6 +8,7 @@ use agent_client_protocol::schema::{
     ProtocolVersion, ResumeSessionRequest, ResumeSessionResponse, SessionId as AcpSessionId,
     SessionInfo,
 };
+use agent_client_protocol::util::MatchDispatch;
 use agent_client_protocol::{
     Agent, ByteStreams, Client, Dispatch, DynConnectTo, HandleDispatchFrom, Handled, Responder,
 };
@@ -18,7 +19,6 @@ use tokio::sync::mpsc;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::agent::AgentFactory;
-use crate::error::Error;
 use crate::session::{LifecycleEvent, LifecycleEventSender};
 use crate::state::{DaemonState, SessionRecord};
 
@@ -136,7 +136,6 @@ enum AgentReadyResponder {
 // Dispatcher
 // ---------------------------------------------------------------------------
 
-
 pub(super) struct Dispatcher<'scope> {
     tasks: TaskSpawner<'scope, crate::error::Error>,
     clients: HashMap<ClientId, ClientHandle>,
@@ -212,11 +211,11 @@ impl<'scope> Dispatcher<'scope> {
 
     pub(super) async fn run(&mut self, mut rx: mpsc::UnboundedReceiver<DispatcherMessage>) {
         while let Some(msg) = rx.recv().await {
-            self.handle_message(msg);
+            self.handle_message(msg).await;
         }
     }
 
-    fn handle_message(&mut self, msg: DispatcherMessage) {
+    async fn handle_message(&mut self, msg: DispatcherMessage) {
         match msg {
             DispatcherMessage::ClientRegistered {
                 client_id,
@@ -257,7 +256,7 @@ impl<'scope> Dispatcher<'scope> {
                 client_id,
                 dispatch,
             } => {
-                self.handle_from_client(client_id, dispatch);
+                self.handle_from_client(client_id, dispatch).await;
             }
             DispatcherMessage::FromAgent { agent_id, dispatch } => {
                 self.handle_from_agent(agent_id, dispatch);
@@ -437,86 +436,39 @@ impl<'scope> Dispatcher<'scope> {
     // FromClient routing
     // -----------------------------------------------------------------------
 
-    fn handle_from_client(&mut self, client_id: ClientId, dispatch: Dispatch) {
-        // Manual dispatch: check method string and deserialize
-        let method = match &dispatch {
-            Dispatch::Request(req, _) => Some(req.method().to_string()),
-            _ => None,
-        };
-
-        match method.as_deref() {
-            Some("initialize") => {
-                if let Dispatch::Request(req, responder) = dispatch {
-                    match serde_json::from_value::<InitializeRequest>(req.params.clone()) {
-                        Ok(init_req) => {
-                            self.handle_initialize(client_id, init_req, responder.cast())
-                        }
-                        Err(e) => {
-                            let _ = responder.respond_with_error(
-                                agent_client_protocol::Error::invalid_params().data(e.to_string()),
-                            );
-                        }
-                    }
-                }
-            }
-            Some("session/list") => {
-                if let Dispatch::Request(req, responder) = dispatch {
-                    match serde_json::from_value::<ListSessionsRequest>(req.params.clone()) {
-                        Ok(list_req) => self.handle_list_sessions(list_req, responder.cast()),
-                        Err(e) => {
-                            let _ = responder.respond_with_error(
-                                agent_client_protocol::Error::invalid_params().data(e.to_string()),
-                            );
-                        }
-                    }
-                }
-            }
-            Some("session/new") => {
-                if let Dispatch::Request(req, responder) = dispatch {
-                    match serde_json::from_value::<NewSessionRequest>(req.params.clone()) {
-                        Ok(new_req) => {
-                            self.handle_session_new(client_id, new_req, responder.cast())
-                        }
-                        Err(e) => {
-                            let _ = responder.respond_with_error(
-                                agent_client_protocol::Error::invalid_params().data(e.to_string()),
-                            );
-                        }
-                    }
-                }
-            }
-            Some("session/load") => {
-                if let Dispatch::Request(req, responder) = dispatch {
-                    match serde_json::from_value::<LoadSessionRequest>(req.params.clone()) {
-                        Ok(load_req) => {
-                            self.handle_session_load(client_id, load_req, responder.cast())
-                        }
-                        Err(e) => {
-                            let _ = responder.respond_with_error(
-                                agent_client_protocol::Error::invalid_params().data(e.to_string()),
-                            );
-                        }
-                    }
-                }
-            }
-            Some("session/resume") => {
-                if let Dispatch::Request(req, responder) = dispatch {
-                    match serde_json::from_value::<ResumeSessionRequest>(req.params.clone()) {
-                        Ok(resume_req) => {
-                            self.handle_session_resume(client_id, resume_req, responder.cast())
-                        }
-                        Err(e) => {
-                            let _ = responder.respond_with_error(
-                                agent_client_protocol::Error::invalid_params().data(e.to_string()),
-                            );
-                        }
-                    }
-                }
-            }
-            _ => {
+    async fn handle_from_client(&mut self, client_id: ClientId, dispatch: Dispatch) {
+        MatchDispatch::new(dispatch)
+            .if_request(async |req: InitializeRequest, responder| {
+                self.handle_initialize(client_id, req, responder);
+                Ok(())
+            })
+            .await
+            .if_request(async |req: ListSessionsRequest, responder| {
+                self.handle_list_sessions(req, responder);
+                Ok(())
+            })
+            .await
+            .if_request(async |req: NewSessionRequest, responder| {
+                self.handle_session_new(client_id, req, responder);
+                Ok(())
+            })
+            .await
+            .if_request(async |req: LoadSessionRequest, responder| {
+                self.handle_session_load(client_id, req, responder);
+                Ok(())
+            })
+            .await
+            .if_request(async |req: ResumeSessionRequest, responder| {
+                self.handle_session_resume(client_id, req, responder);
+                Ok(())
+            })
+            .await
+            .otherwise(async |dispatch| {
                 self.route_to_agent(client_id, dispatch);
-            }
-        }
+                Ok(())
+            })
+            .await
+            .ok();
     }
 
     fn route_to_agent(&self, client_id: ClientId, dispatch: Dispatch) {
@@ -1048,9 +1000,14 @@ async fn agent_pipe(
                     .await?;
 
                 match spawn_request.request {
-                    SessionRequest::New { ref cwd, ref mcp_servers } => {
+                    SessionRequest::New {
+                        ref cwd,
+                        ref mcp_servers,
+                    } => {
                         let resp = cx
-                            .send_request(NewSessionRequest::new(cwd).mcp_servers(mcp_servers.clone()))
+                            .send_request(
+                                NewSessionRequest::new(cwd).mcp_servers(mcp_servers.clone()),
+                            )
                             .block_task()
                             .await?;
 
@@ -1150,9 +1107,15 @@ async fn agent_pipe(
         if let Some(responder) = responder_slot.lock().unwrap().take() {
             let err = agent_client_protocol::Error::internal_error().data(e.to_string());
             match responder {
-                AgentReadyResponder::NewSession(r) => { let _ = r.respond_with_error(err); }
-                AgentReadyResponder::LoadSession(r) => { let _ = r.respond_with_error(err); }
-                AgentReadyResponder::ResumeSession(r) => { let _ = r.respond_with_error(err); }
+                AgentReadyResponder::NewSession(r) => {
+                    let _ = r.respond_with_error(err);
+                }
+                AgentReadyResponder::LoadSession(r) => {
+                    let _ = r.respond_with_error(err);
+                }
+                AgentReadyResponder::ResumeSession(r) => {
+                    let _ = r.respond_with_error(err);
+                }
             }
         }
     }
