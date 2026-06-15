@@ -72,7 +72,10 @@ macro_rules! scope_hack {
 /// ```
 pub async fn scope<'env, T, E, F>(
     main_fn: F,
-    hack: impl FnOnce(F, TaskSpawner<'env, E>) -> Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'env>>,
+    hack: impl FnOnce(
+        F,
+        TaskSpawner<'env, E>,
+    ) -> Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'env>>,
 ) -> Result<T, E>
 where
     T: 'env,

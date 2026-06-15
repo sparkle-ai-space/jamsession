@@ -126,7 +126,7 @@ struct AgentHandle {
 // ---------------------------------------------------------------------------
 
 #[expect(clippy::enum_variant_names)]
-pub(super) enum AgentReadyResponder {
+enum AgentReadyResponder {
     NewSession(Responder<NewSessionResponse>),
     LoadSession(Responder<LoadSessionResponse>),
     ResumeSession(Responder<ResumeSessionResponse>),

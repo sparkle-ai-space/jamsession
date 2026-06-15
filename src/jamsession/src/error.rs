@@ -25,7 +25,7 @@ pub enum Error {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum StateError {
+pub(super) enum StateError {
     #[error("failed to write state file: {0}")]
     Write(std::io::Error),
 

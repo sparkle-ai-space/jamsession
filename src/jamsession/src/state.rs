@@ -9,7 +9,7 @@ use crate::error::StateError;
 pub struct DaemonState {
     version: u32,
     pub(super) sessions: Vec<SessionRecord>,
-    pub(super) capabilities_cache: Option<CachedCapabilities>,
+    capabilities_cache: Option<CachedCapabilities>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,9 +21,9 @@ pub(super) struct SessionRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct CachedCapabilities {
-    pub(super) client_capabilities_hash: u64,
-    pub(super) response: serde_json::Value,
+struct CachedCapabilities {
+    client_capabilities_hash: u64,
+    response: serde_json::Value,
 }
 
 impl DaemonState {
