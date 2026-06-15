@@ -1,11 +1,8 @@
 use std::path::Path;
 use std::str::FromStr;
 
-use agent_client_protocol::schema::{
-    InitializeRequest, InitializeResponse, LoadSessionRequest, McpServer, NewSessionRequest,
-    NewSessionResponse, ProtocolVersion, SessionId,
-};
-use agent_client_protocol::{AcpAgent, Client, ConnectionTo, DynConnectTo};
+use agent_client_protocol::schema::McpServer;
+use agent_client_protocol::{AcpAgent, Client, DynConnectTo};
 
 use crate::error::Error;
 
@@ -73,97 +70,5 @@ impl AgentFactory for BinaryFactory {
         Ok(DynConnectTo::new(
             AcpAgent::from_str(&cmd).expect("valid agent command"),
         ))
-    }
-}
-
-pub(super) struct AgentManager;
-
-impl AgentManager {
-    /// Probe agent capabilities by spawning a short-lived "temp agent" (FR-008).
-    pub(super) async fn get_capabilities(
-        req: &InitializeRequest,
-        factory: &dyn AgentFactory,
-    ) -> Result<InitializeResponse, Error> {
-        let agent_transport = factory.create_transport("", Path::new("/"), &[])?;
-        let init_req = req.clone();
-
-        let response = Client
-            .builder()
-            .name("jamsession-daemon-caps")
-            .connect_with(
-                agent_transport,
-                async move |cx: ConnectionTo<agent_client_protocol::Agent>| {
-                    let resp = cx
-                        .send_request(
-                            InitializeRequest::new(ProtocolVersion::V1)
-                                .client_capabilities(init_req.client_capabilities.clone()),
-                        )
-                        .block_task()
-                        .await?;
-                    Ok(resp)
-                },
-            )
-            .await
-            .map_err(|e| Error::AgentSpawn(format!("capabilities probe failed: {e}")))?;
-
-        Ok(response)
-    }
-
-    /// Spawn an agent subprocess and return the connection handle.
-    pub(super) fn spawn_agent_connection(
-        client_cx: &ConnectionTo<agent_client_protocol::Client>,
-        factory: &dyn AgentFactory,
-        session_id: &str,
-        cwd: &Path,
-        mcp_servers: &[McpServer],
-    ) -> Result<ConnectionTo<agent_client_protocol::Agent>, Error> {
-        let agent_transport = factory.create_transport(session_id, cwd, mcp_servers)?;
-        client_cx
-            .spawn_connection(
-                Client.builder().name("jamsession-daemon-agent"),
-                agent_transport,
-            )
-            .map_err(|e| Error::AgentSpawn(format!("failed to spawn agent connection: {e}")))
-    }
-
-    /// Initialize the ACP protocol on an agent connection.
-    pub(super) async fn initialize_agent(
-        agent_cx: &ConnectionTo<agent_client_protocol::Agent>,
-    ) -> Result<InitializeResponse, Error> {
-        agent_cx
-            .send_request(InitializeRequest::new(ProtocolVersion::V1))
-            .block_task()
-            .await
-            .map_err(|e| Error::AgentSpawn(format!("agent initialize failed: {e}")))
-    }
-
-    /// Send session/new to an initialized agent.
-    pub(super) async fn new_session_on_agent(
-        agent_cx: &ConnectionTo<agent_client_protocol::Agent>,
-        cwd: &std::path::Path,
-        mcp_servers: Vec<McpServer>,
-    ) -> Result<NewSessionResponse, Error> {
-        agent_cx
-            .send_request(NewSessionRequest::new(cwd).mcp_servers(mcp_servers))
-            .block_task()
-            .await
-            .map_err(|e| Error::AgentSpawn(format!("agent session/new failed: {e}")))
-    }
-
-    /// Send session/load to an initialized agent.
-    pub(super) async fn load_session_on_agent(
-        agent_cx: &ConnectionTo<agent_client_protocol::Agent>,
-        session_id: &str,
-        cwd: &std::path::Path,
-        mcp_servers: Vec<McpServer>,
-    ) -> Result<(), Error> {
-        agent_cx
-            .send_request(
-                LoadSessionRequest::new(SessionId::new(session_id), cwd).mcp_servers(mcp_servers),
-            )
-            .block_task()
-            .await
-            .map_err(|e| Error::AgentSpawn(format!("agent session/load failed: {e}")))?;
-        Ok(())
     }
 }

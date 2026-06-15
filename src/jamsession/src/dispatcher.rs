@@ -88,6 +88,7 @@ pub(super) enum DispatcherMessage {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum LifecycleState {
     AgentDead,
     Active,
@@ -149,7 +150,6 @@ pub(super) struct Dispatcher {
     send_guidelines: bool,
     event_tx: Option<LifecycleEventSender>,
     dispatcher_tx: mpsc::UnboundedSender<DispatcherMessage>,
-    next_client_id: u64,
     next_agent_id: u64,
 }
 
@@ -181,7 +181,6 @@ impl Dispatcher {
             send_guidelines,
             event_tx,
             dispatcher_tx,
-            next_client_id: 1,
             next_agent_id: 1,
         };
         dispatcher.rehydrate_from_state(&state);
@@ -689,11 +688,9 @@ impl Dispatcher {
                 AgentSpawnRequest {
                     client_id,
                     agent_id,
-                    mode: AgentSpawnMode::Session {
-                        request: SessionRequest::New {
-                            cwd: req.cwd,
-                            mcp_servers: req.mcp_servers,
-                        },
+                    request: SessionRequest::New {
+                        cwd: req.cwd,
+                        mcp_servers: req.mcp_servers,
                     },
                     send_guidelines,
                 },
@@ -754,12 +751,10 @@ impl Dispatcher {
                     AgentSpawnRequest {
                         client_id,
                         agent_id,
-                        mode: AgentSpawnMode::Session {
-                            request: SessionRequest::Load {
-                                session_id,
-                                cwd,
-                                mcp_servers: req.mcp_servers,
-                            },
+                        request: SessionRequest::Load {
+                            session_id,
+                            cwd,
+                            mcp_servers: req.mcp_servers,
                         },
                         send_guidelines: false,
                     },
@@ -843,12 +838,10 @@ impl Dispatcher {
                     AgentSpawnRequest {
                         client_id,
                         agent_id,
-                        mode: AgentSpawnMode::Session {
-                            request: SessionRequest::Load {
-                                session_id,
-                                cwd,
-                                mcp_servers: req.mcp_servers,
-                            },
+                        request: SessionRequest::Load {
+                            session_id,
+                            cwd,
+                            mcp_servers: req.mcp_servers,
                         },
                         send_guidelines: false,
                     },
@@ -989,13 +982,7 @@ impl Dispatcher {
         }
     }
 
-    pub(super) fn generate_client_id(&mut self) -> ClientId {
-        let id = self.next_client_id;
-        self.next_client_id += 1;
-        id
-    }
-
-    pub(super) fn generate_agent_id(&mut self) -> AgentId {
+    fn generate_agent_id(&mut self) -> AgentId {
         let id = self.next_agent_id;
         self.next_agent_id += 1;
         id
@@ -1052,38 +1039,11 @@ pub(super) async fn client_pipe(
 }
 
 // ---------------------------------------------------------------------------
-// ClientForwarder (standalone handler — alternative to on_receive_dispatch)
-// ---------------------------------------------------------------------------
-
-struct ClientDispatchForwarder {
-    client_id: ClientId,
-    dispatcher_tx: mpsc::UnboundedSender<DispatcherMessage>,
-}
-
-impl HandleDispatchFrom<agent_client_protocol::Client> for ClientDispatchForwarder {
-    async fn handle_dispatch_from(
-        &mut self,
-        message: Dispatch,
-        _cx: agent_client_protocol::ConnectionTo<agent_client_protocol::Client>,
-    ) -> agent_client_protocol::schema::Result<Handled<Dispatch>> {
-        let _ = self.dispatcher_tx.send(DispatcherMessage::FromClient {
-            client_id: self.client_id,
-            dispatch: message,
-        });
-        Ok(Handled::Yes)
-    }
-
-    fn describe_chain(&self) -> impl std::fmt::Debug {
-        "ClientDispatchForwarder"
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Agent Pipe
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
-pub(super) enum SessionRequest {
+enum SessionRequest {
     New {
         cwd: PathBuf,
         mcp_servers: Vec<agent_client_protocol::schema::McpServer>,
@@ -1095,19 +1055,14 @@ pub(super) enum SessionRequest {
     },
 }
 
-pub(super) enum AgentSpawnMode {
-    Probe,
-    Session { request: SessionRequest },
+struct AgentSpawnRequest {
+    client_id: ClientId,
+    agent_id: AgentId,
+    request: SessionRequest,
+    send_guidelines: bool,
 }
 
-pub(super) struct AgentSpawnRequest {
-    pub(super) client_id: ClientId,
-    pub(super) agent_id: AgentId,
-    pub(super) mode: AgentSpawnMode,
-    pub(super) send_guidelines: bool,
-}
-
-pub(super) async fn agent_pipe(
+async fn agent_pipe(
     transport: DynConnectTo<Client>,
     dispatcher_tx: mpsc::UnboundedSender<DispatcherMessage>,
     spawn_request: AgentSpawnRequest,
@@ -1121,115 +1076,94 @@ pub(super) async fn agent_pipe(
         .connect_with(transport, {
             let dispatcher_tx = dispatcher_tx.clone();
             async move |cx: agent_client_protocol::ConnectionTo<agent_client_protocol::Agent>| {
-                // --- Handshake phase ---
-                let init_resp = cx
-                    .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
                     .block_task()
                     .await?;
 
-                match spawn_request.mode {
-                    AgentSpawnMode::Probe => {
-                        let _ = dispatcher_tx.send(DispatcherMessage::AgentCapabilities {
-                            capabilities: init_resp,
-                        });
-                        return Ok(());
-                    }
-                    AgentSpawnMode::Session { request } => {
-                        match request {
-                            SessionRequest::New { cwd, mcp_servers } => {
-                                let resp = cx
-                                    .send_request(
-                                        NewSessionRequest::new(&cwd).mcp_servers(mcp_servers),
-                                    )
-                                    .block_task()
-                                    .await?;
+                match spawn_request.request {
+                    SessionRequest::New { cwd, mcp_servers } => {
+                        let resp = cx
+                            .send_request(NewSessionRequest::new(&cwd).mcp_servers(mcp_servers))
+                            .block_task()
+                            .await?;
 
-                                let session_id = resp.session_id.0.to_string();
+                        let session_id = resp.session_id.0.to_string();
 
-                                if spawn_request.send_guidelines {
-                                    use agent_client_protocol::schema::{
-                                        ContentBlock, PromptRequest, TextContent,
-                                    };
-                                    static GUIDELINES: &str = include_str!("guidelines.md");
-                                    cx.send_request(PromptRequest::new(
-                                        AcpSessionId::new(session_id.as_str()),
-                                        vec![ContentBlock::Text(TextContent::new(GUIDELINES))],
-                                    ))
-                                    .block_task()
-                                    .await?;
-                                }
-
-                                // Install forwarding handler
-                                cx.add_dynamic_handler(AgentDispatchForwarder {
-                                    agent_id,
-                                    dispatcher_tx: dispatcher_tx.clone(),
-                                })
-                                .map_err(|e| {
-                                    agent_client_protocol::Error::internal_error()
-                                        .data(format!("forwarder: {e}"))
-                                })?
-                                .run_indefinitely();
-
-                                let _ = dispatcher_tx.send(DispatcherMessage::AgentReady {
-                                    agent_id,
-                                    outgoing_tx,
-                                    session_id,
-                                    client_id: spawn_request.client_id,
-                                    replay_notifications: Vec::new(),
-                                });
-                            }
-                            SessionRequest::Load {
-                                session_id,
-                                cwd,
-                                mcp_servers,
-                            } => {
-                                // Install a capture handler to collect replay notifications
-                                let replay_buffer: Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
-                                    Arc::new(std::sync::Mutex::new(Vec::new()));
-                                cx.add_dynamic_handler(ReplayCapture {
-                                    buffer: replay_buffer.clone(),
-                                })
-                                .map_err(|e| {
-                                    agent_client_protocol::Error::internal_error()
-                                        .data(format!("replay capture: {e}"))
-                                })?
-                                .run_indefinitely();
-
-                                cx.send_request(
-                                    LoadSessionRequest::new(
-                                        AcpSessionId::new(session_id.as_str()),
-                                        &cwd,
-                                    )
-                                    .mcp_servers(mcp_servers),
-                                )
-                                .block_task()
-                                .await?;
-
-                                // Switch to forwarding handler
-                                cx.add_dynamic_handler(AgentDispatchForwarder {
-                                    agent_id,
-                                    dispatcher_tx: dispatcher_tx.clone(),
-                                })
-                                .map_err(|e| {
-                                    agent_client_protocol::Error::internal_error()
-                                        .data(format!("forwarder: {e}"))
-                                })?
-                                .run_indefinitely();
-
-                                let replay = replay_buffer.lock().unwrap().clone();
-                                let _ = dispatcher_tx.send(DispatcherMessage::AgentReady {
-                                    agent_id,
-                                    outgoing_tx,
-                                    session_id,
-                                    client_id: spawn_request.client_id,
-                                    replay_notifications: replay,
-                                });
-                            }
+                        if spawn_request.send_guidelines {
+                            use agent_client_protocol::schema::{
+                                ContentBlock, PromptRequest, TextContent,
+                            };
+                            static GUIDELINES: &str = include_str!("guidelines.md");
+                            cx.send_request(PromptRequest::new(
+                                AcpSessionId::new(session_id.as_str()),
+                                vec![ContentBlock::Text(TextContent::new(GUIDELINES))],
+                            ))
+                            .block_task()
+                            .await?;
                         }
+
+                        cx.add_dynamic_handler(AgentDispatchForwarder {
+                            agent_id,
+                            dispatcher_tx: dispatcher_tx.clone(),
+                        })
+                        .map_err(|e| {
+                            agent_client_protocol::Error::internal_error()
+                                .data(format!("forwarder: {e}"))
+                        })?
+                        .run_indefinitely();
+
+                        let _ = dispatcher_tx.send(DispatcherMessage::AgentReady {
+                            agent_id,
+                            outgoing_tx,
+                            session_id,
+                            client_id: spawn_request.client_id,
+                            replay_notifications: Vec::new(),
+                        });
+                    }
+                    SessionRequest::Load {
+                        session_id,
+                        cwd,
+                        mcp_servers,
+                    } => {
+                        let replay_buffer: Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
+                            Arc::new(std::sync::Mutex::new(Vec::new()));
+                        cx.add_dynamic_handler(ReplayCapture {
+                            buffer: replay_buffer.clone(),
+                        })
+                        .map_err(|e| {
+                            agent_client_protocol::Error::internal_error()
+                                .data(format!("replay capture: {e}"))
+                        })?
+                        .run_indefinitely();
+
+                        cx.send_request(
+                            LoadSessionRequest::new(AcpSessionId::new(session_id.as_str()), &cwd)
+                                .mcp_servers(mcp_servers),
+                        )
+                        .block_task()
+                        .await?;
+
+                        cx.add_dynamic_handler(AgentDispatchForwarder {
+                            agent_id,
+                            dispatcher_tx: dispatcher_tx.clone(),
+                        })
+                        .map_err(|e| {
+                            agent_client_protocol::Error::internal_error()
+                                .data(format!("forwarder: {e}"))
+                        })?
+                        .run_indefinitely();
+
+                        let replay = replay_buffer.lock().unwrap().clone();
+                        let _ = dispatcher_tx.send(DispatcherMessage::AgentReady {
+                            agent_id,
+                            outgoing_tx,
+                            session_id,
+                            client_id: spawn_request.client_id,
+                            replay_notifications: replay,
+                        });
                     }
                 }
 
-                // Park: pump outgoing dispatches until the channel closes
                 while let Some(dispatch) = outgoing_rx.recv().await {
                     cx.send_proxied_message(dispatch)?;
                 }

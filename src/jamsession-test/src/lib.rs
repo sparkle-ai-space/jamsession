@@ -110,7 +110,7 @@ impl TestDaemon {
                     .with_quiescence_timeout(Duration::from_millis(10))
                     .with_send_guidelines(false)
                     .with_lifecycle_events(lifecycle_tx);
-            let _ = daemon.run_v2().await;
+            let _ = daemon.run().await;
         });
 
         let events: Arc<Mutex<Vec<LifecycleEvent>>> = Arc::new(Mutex::new(Vec::new()));
