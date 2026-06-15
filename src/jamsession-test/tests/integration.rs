@@ -212,7 +212,7 @@ async fn load_live_session_replays_buffer() {
 }
 
 #[tokio::test]
-#[ignore = "requires independent agent connections: spawn_connection ties agent lifetime to client"]
+#[ignore = "rhaicp client sends empty prompt during load_session which consumes receive_prompt() slot"]
 async fn load_dead_session_respawns_agent() {
     let daemon = TestDaemon::start(TestDaemonConfig {
         idle_timeout: Duration::from_millis(50),
@@ -259,7 +259,7 @@ async fn load_dead_session_respawns_agent() {
 }
 
 #[tokio::test]
-#[ignore = "requires independent agent connections: spawn_connection ties agent lifetime to client"]
+#[ignore = "rhaicp client sends empty prompt during load_session which consumes receive_prompt() slot"]
 async fn agent_killed_after_idle_timeout() {
     let daemon = TestDaemon::start(TestDaemonConfig {
         idle_timeout: Duration::from_millis(50),
