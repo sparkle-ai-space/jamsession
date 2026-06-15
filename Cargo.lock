@@ -1536,6 +1536,7 @@ dependencies = [
  "dirs",
  "lazy_static",
  "pkg-config",
+ "scope-tasks",
  "serde",
  "serde_json",
  "tempfile",
@@ -2598,6 +2599,15 @@ dependencies = [
  "quote",
  "serde_derive_internals",
  "syn",
+]
+
+[[package]]
+name = "scope-tasks"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "tokio",
+ "tokio-stream",
 ]
 
 [[package]]

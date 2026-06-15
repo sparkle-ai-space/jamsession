@@ -158,6 +158,82 @@ impl Daemon {
         // ANCHOR_END: accept-loop
     }
 
+    pub async fn run_v2(&self) -> Result<(), Error> {
+        use crate::dispatcher::{self, Dispatcher, DispatcherMessage};
+
+        let state = DaemonState::load(&self.state_path);
+
+        let (dispatcher_tx, dispatcher_rx) = mpsc::unbounded_channel::<DispatcherMessage>();
+
+        // CWD health check timer
+        {
+            let tx = dispatcher_tx.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    let _ = tx.send(DispatcherMessage::CwdHealthCheck);
+                }
+            });
+        }
+
+        // Prepare socket
+        if let Some(parent) = self.socket_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let _ = tokio::fs::remove_file(&self.socket_path).await;
+        let listener = UnixListener::bind(&self.socket_path)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(&self.socket_path, perms)?;
+        }
+
+        tracing::info!(path = %self.socket_path.display(), "daemon listening (v2)");
+
+        if let Some(tx) = &self.lifecycle_tx {
+            let _ = tx.send(LifecycleEvent::Initialized);
+        }
+
+        // Spawn accept loop (independent tokio task)
+        {
+            let accept_tx = dispatcher_tx.clone();
+            tokio::spawn(async move {
+                let mut next_client_id = 1u64;
+                loop {
+                    match listener.accept().await {
+                        Ok((stream, _)) => {
+                            let client_id = next_client_id;
+                            next_client_id += 1;
+                            let tx = accept_tx.clone();
+                            tokio::spawn(dispatcher::client_pipe(stream, client_id, tx));
+                        }
+                        Err(e) => {
+                            tracing::error!("accept error: {e}");
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+
+        // Run dispatcher directly (no scope needed — all spawned work is 'static)
+        let mut dispatcher = Dispatcher::new(
+            state,
+            self.state_path.clone(),
+            self.factory.clone(),
+            self.idle_timeout,
+            self.quiescence_timeout,
+            self.send_guidelines,
+            self.lifecycle_tx.clone(),
+            dispatcher_tx,
+        );
+
+        dispatcher.run(dispatcher_rx).await;
+        Ok(())
+    }
+
     pub async fn shutdown(&self) {
         let _ = tokio::fs::remove_file(&self.socket_path).await;
         tracing::info!("daemon shut down");
