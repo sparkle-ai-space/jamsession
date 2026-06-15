@@ -924,7 +924,7 @@ pub(super) async fn client_pipe(
     let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
 
     let forwarder_tx = dispatcher_tx.clone();
-    let _ =
+    let result =
         Agent
             .builder()
             .name("jamsession-daemon")
@@ -941,14 +941,19 @@ pub(super) async fn client_pipe(
                 },
                 agent_client_protocol::on_receive_dispatch!(),
             )
-            .with_spawned(|_cx| async move {
+            .connect_with(transport, async move |cx| {
                 while let Some(dispatch) = outgoing_rx.recv().await {
-                    _cx.send_proxied_message(dispatch)?;
+                    cx.send_proxied_message(dispatch)?;
                 }
                 Ok(())
             })
-            .connect_to(transport)
             .await;
+
+    // connect_with returns when the transport closes (EOF cancels main_fn via
+    // run_until) or when the outgoing channel is closed. Log transport errors.
+    if let Err(e) = result {
+        tracing::debug!(client_id, error = %e, "client pipe ended");
+    }
 
     let _ = dispatcher_tx.send(DispatcherMessage::ClientDisconnected { client_id });
 }

@@ -211,8 +211,8 @@ async fn load_live_session_replays_buffer() {
     assert_eq!(result, "second: world");
 }
 
-#[tokio::test]
-#[ignore = "rhaicp client sends empty prompt during load_session which consumes receive_prompt() slot"]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "ACP SDK try_join! in connect_to background doesn't terminate on transport EOF; ClientDisconnected never fires"]
 async fn load_dead_session_respawns_agent() {
     let daemon = TestDaemon::start(TestDaemonConfig {
         idle_timeout: Duration::from_millis(50),
@@ -258,8 +258,8 @@ async fn load_dead_session_respawns_agent() {
     assert_eq!(result, "new: follow up");
 }
 
-#[tokio::test]
-#[ignore = "rhaicp client sends empty prompt during load_session which consumes receive_prompt() slot"]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "ACP SDK try_join! in connect_to background doesn't terminate on transport EOF; ClientDisconnected never fires"]
 async fn agent_killed_after_idle_timeout() {
     let daemon = TestDaemon::start(TestDaemonConfig {
         idle_timeout: Duration::from_millis(50),
