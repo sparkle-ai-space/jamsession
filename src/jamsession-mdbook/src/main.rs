@@ -173,7 +173,7 @@ fn remote_url_by_name(root: &Path, name: &str) -> Option<String> {
 }
 
 /// Parse "owner/repo" from a GitHub remote URL.
-/// Handles: git@github.com:owner/repo.git, https://github.com/owner/repo.git
+/// Handles: `git@github.com:owner/repo.git`, `https://github.com/owner/repo.git`
 fn parse_github_repo(url: &str) -> Option<String> {
     let path = if let Some(rest) = url.strip_prefix("git@github.com:") {
         rest
