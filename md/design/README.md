@@ -15,7 +15,7 @@ Then walk through the flow pages to see how each operation moves through the cod
 - **[Agent crash](./flow-agent-crash.md)** — detection and recovery
 - **[CWD health check](./flow-cwd-health.md)** — periodic cleanup of deleted directories
 
-Each page includes `{anchor}` code references that link directly to the source.
+Each page includes anchor code references that link directly to the source.
 
 ## Key concepts
 

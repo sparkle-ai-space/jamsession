@@ -1,6 +1,6 @@
 # Key sequence diagrams
 
-Each page below walks through a major daemon flow with a mermaid diagram, step-by-step code walkthrough via `{anchor}` references, and a list of covering integration tests.
+Each page below walks through a major daemon flow with a mermaid diagram, step-by-step code walkthrough via anchor references, and a list of covering integration tests.
 
 - [New session](./flow-new-session.md) — connect, initialize, create session, bridge
 - [Reconnect (load/resume)](./flow-reconnect.md) — dead agent → respawn; alive agent → rewire
