@@ -1571,6 +1571,7 @@ dependencies = [
  "agent-client-protocol",
  "anyhow",
  "expect-test",
+ "futures",
  "jamsession",
  "rhaicp",
  "scope-tasks",

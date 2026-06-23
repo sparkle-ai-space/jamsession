@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::schema::{McpServer, SessionId};
-use agent_client_protocol::{Client, DynConnectTo};
+use agent_client_protocol::{BoxFuture, Channel, Client, ConnectTo, DynConnectTo};
 use jamsession::agent::AgentFactory;
 use jamsession::error::Error;
 use rhaicp::RhaiAgent;
@@ -61,11 +61,81 @@ impl AgentFactory for RhaiAgentFactory {
     }
 }
 
+/// An `AgentFactory` that wraps another factory and crashes the agent after a delay.
+///
+/// Used to simulate the agent process dying unexpectedly (as opposed to the
+/// daemon killing it via idle timeout).
+pub struct CrashableAgentFactory {
+    inner: Arc<dyn AgentFactory>,
+    crash_after: Duration,
+}
+
+impl CrashableAgentFactory {
+    pub fn new(inner: Arc<dyn AgentFactory>, crash_after: Duration) -> Self {
+        Self { inner, crash_after }
+    }
+}
+
+impl AgentFactory for CrashableAgentFactory {
+    fn create_transport(
+        &self,
+        session_id: &str,
+        cwd: &Path,
+        mcp_servers: &[McpServer],
+    ) -> Result<DynConnectTo<Client>, Error> {
+        let transport = self.inner.create_transport(session_id, cwd, mcp_servers)?;
+        Ok(DynConnectTo::new(TimeBombTransport {
+            inner: transport,
+            fuse: self.crash_after,
+        }))
+    }
+}
+
+/// A transport that runs the inner agent but aborts the connection after a delay.
+struct TimeBombTransport {
+    inner: DynConnectTo<Client>,
+    fuse: Duration,
+}
+
+impl ConnectTo<Client> for TimeBombTransport {
+    async fn connect_to(
+        self,
+        client: impl ConnectTo<agent_client_protocol::Agent>,
+    ) -> agent_client_protocol::schema::Result<()> {
+        let (channel, future) = ConnectTo::<Client>::into_channel_and_future(self);
+        match futures::future::select(Box::pin(client.connect_to(channel)), future).await {
+            futures::future::Either::Left((result, _))
+            | futures::future::Either::Right((result, _)) => result,
+        }
+    }
+
+    fn into_channel_and_future(
+        self,
+    ) -> (
+        Channel,
+        BoxFuture<'static, agent_client_protocol::schema::Result<()>>,
+    ) {
+        let (channel, future) = self.inner.into_channel_and_future();
+        let fuse = self.fuse;
+        let timed_future: BoxFuture<'static, agent_client_protocol::schema::Result<()>> =
+            Box::pin(async move {
+                tokio::select! {
+                    result = future => result,
+                    () = tokio::time::sleep(fuse) => {
+                        Err(agent_client_protocol::Error::new(-1, "agent crashed (simulated)"))
+                    }
+                }
+            });
+        (channel, timed_future)
+    }
+}
+
 /// Configuration for a test daemon instance.
 pub struct TestDaemonConfig {
     pub idle_timeout: Duration,
     pub agent_script: String,
     pub prior_sessions: Vec<PriorSession>,
+    pub crash_after: Option<Duration>,
 }
 
 impl Default for TestDaemonConfig {
@@ -74,6 +144,7 @@ impl Default for TestDaemonConfig {
             idle_timeout: Duration::from_secs(300),
             agent_script: String::new(),
             prior_sessions: Vec::new(),
+            crash_after: None,
         }
     }
 }
@@ -96,7 +167,14 @@ impl TestDaemon {
         let socket_path = temp_dir.path().join("daemon.sock");
         let state_path = temp_dir.path().join("state.json");
 
-        let factory: Arc<dyn AgentFactory> = Arc::new(RhaiAgentFactory::new(&config));
+        let factory: Arc<dyn AgentFactory> = {
+            let base: Arc<dyn AgentFactory> = Arc::new(RhaiAgentFactory::new(&config));
+            if let Some(crash_after) = config.crash_after {
+                Arc::new(CrashableAgentFactory::new(base, crash_after))
+            } else {
+                base
+            }
+        };
         let idle_timeout = config.idle_timeout;
 
         let (lifecycle_tx, lifecycle_rx) = mpsc::unbounded_channel();

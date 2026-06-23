@@ -300,6 +300,52 @@ async fn agent_killed_after_idle_timeout() {
     assert_eq!(result, "alive: after respawn");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_crash_detected_and_reload_works() {
+    let daemon = TestDaemon::start(TestDaemonConfig {
+        agent_script: r#"
+            if is_load() {}
+            loop {
+                let prompt = receive_prompt();
+                if prompt != "" {
+                    say("response: " + prompt);
+                    break;
+                }
+            }
+        "#
+        .into(),
+        // Agent connection will be forcibly closed 200ms after spawn
+        crash_after: Some(Duration::from_millis(200)),
+        ..Default::default()
+    })
+    .await;
+
+    let session_id = daemon
+        .execute_client(
+            r#"
+        let s = start_session();
+        s.prompt("hello");
+        s.session_id()
+    "#,
+        )
+        .await;
+
+    // Wait for the agent to crash (time bomb fires after 200ms)
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Load the session — should detect dead agent and spawn a new one
+    let result = daemon
+        .execute_client(&format!(
+            r#"
+        let s = load_session("{session_id}");
+        s.prompt("after crash")
+    "#
+        ))
+        .await;
+
+    assert_eq!(result, "response: after crash");
+}
+
 #[tokio::test]
 async fn direct_rhaiagent_load_session() {
     use agent_client_protocol::schema::SessionId;

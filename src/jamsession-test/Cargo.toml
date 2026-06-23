@@ -16,6 +16,7 @@ tempfile = "3"
 expect-test = "1.5.1"
 scope-tasks = { version = "0.1.0", path = "../scope-tasks" }
 anyhow = "1.0.102"
+futures = "0.3.32"
 
 [[bin]]
 name = "mock-agent"
