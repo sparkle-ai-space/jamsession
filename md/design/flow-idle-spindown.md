@@ -4,28 +4,29 @@ When all clients disconnect from a session, the daemon doesn't kill the agent im
 
 ```mermaid
 sequenceDiagram
-    participant CT as Client Task
-    participant A as Actor
+    participant CP as Client Pipe
+    participant D as Dispatcher
     participant T as Timer
 
-    Note over CT: TCP/socket closes (connect_to returns)
-    CT->>A: ClientDisconnected { session_id }
-    Note over A: Drop client_cx, bump generation, spawn quiescence timer
+    Note over CP: Socket closes (connect_with returns)
+    CP->>D: ClientDisconnected { client_id }
+    Note over D: Remove client_id from session.client_ids
+    Note over D: All clients gone → bump generation, spawn quiescence timer
 
-    T->>A: AgentQuiescent { session_id, generation }
-    Note over A: Check generation matches (stale → discard)
-    Note over A: Transition to Quiescent, spawn idle timer
+    T->>D: AgentQuiescent { session_id, generation }
+    Note over D: Check generation matches (stale → discard)
+    Note over D: Transition to Quiescent, spawn idle timer
 
-    T->>A: IdleTimeoutElapsed { session_id, generation }
-    Note over A: Check generation matches
-    Note over A: Kill agent (drop agent_cx), clear buffer
+    T->>D: IdleTimeoutElapsed { session_id, generation }
+    Note over D: Check generation matches
+    Note over D: Kill agent (drop AgentHandle), clear buffer
 ```
 
 ## How it works
 
 ### Client disconnect detection
 
-When the ACP `connect_to(transport).await` returns (socket closed), the client task sends `ClientDisconnected` to the actor before exiting.
+When the ACP `connect_with(transport).await` returns (socket closed), the `EofSignalingTransport` triggers the outgoing stream to end. The client pipe then sends `ClientDisconnected { client_id }` to the dispatcher before exiting.
 
 ```{anchor}
 client-disconnect
@@ -33,7 +34,7 @@ client-disconnect
 
 ### Generation-counter timer pattern
 
-The actor doesn't track or abort timer tasks. Instead, each session has a monotonic `generation` counter that increments on every state change (client connects, message activity, reconnect). Timer tasks carry the generation they were spawned at. When the timer fires and sends its message back to the actor, the actor compares generations — if they differ, the timer is stale and discarded.
+The dispatcher doesn't track or abort timer tasks. Instead, each session has a monotonic `generation` counter that increments on every state change (client connects/disconnects, message activity, reconnect). Timer tasks carry the generation they were spawned at. When the timer fires and sends its message back to the dispatcher, the dispatcher compares generations — if they differ, the timer is stale and discarded.
 
 This eliminates the need for `JoinHandle` tracking or `.abort()` calls. Sleeping tasks are harmless — they just produce ignored messages.
 
@@ -44,8 +45,8 @@ disconnect-and-idle
 ### Lifecycle state transitions
 
 ```text
-Active → (client disconnects) → spawn quiescence timer
-       → AgentQuiescent (gen matches) → Quiescent → spawn idle timer  
+Active → (all clients disconnect) → spawn quiescence timer
+       → AgentQuiescent (gen matches) → Quiescent → spawn idle timer
        → IdleTimeoutElapsed (gen matches) → kill agent → AgentDead
 ```
 
