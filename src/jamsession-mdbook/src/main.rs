@@ -53,11 +53,22 @@ impl Preprocessor for AnchorPreprocessor {
         let config = Config::from_context(ctx)?;
         let anchors = scan_anchors(&config.root, &config.scan_dirs)?;
 
+        let mut missing: Vec<String> = Vec::new();
+
         book.for_each_mut(|item| {
             if let BookItem::Chapter(chapter) = item {
-                chapter.content = expand_anchors(&chapter.content, &anchors, &config);
+                let (content, chapter_missing) =
+                    expand_anchors_checked(&chapter.content, &anchors, &config);
+                chapter.content = content;
+                missing.extend(chapter_missing);
             }
         });
+
+        if !missing.is_empty() {
+            missing.sort();
+            missing.dedup();
+            anyhow::bail!("unknown anchors: {}", missing.join(", "));
+        }
 
         Ok(book)
     }
@@ -320,18 +331,40 @@ fn dedent(lines: &[String]) -> String {
         .join("\n")
 }
 
-fn expand_anchors(content: &str, anchors: &HashMap<String, Anchor>, config: &Config) -> String {
-    let mut result = expand_block_anchors(content, anchors, config);
-    result = expand_inline_anchors(&result, anchors, config);
-    result
+fn expand_anchors_checked(
+    content: &str,
+    anchors: &HashMap<String, Anchor>,
+    config: &Config,
+) -> (String, Vec<String>) {
+    let mut missing = Vec::new();
+    let mut result = expand_block_anchors_checked(content, anchors, config, &mut missing);
+    result = expand_inline_anchors_checked(&result, anchors, config, &mut missing);
+    (result, missing)
 }
 
+#[cfg(test)]
 fn expand_inline_anchors(
     content: &str,
     anchors: &HashMap<String, Anchor>,
     config: &Config,
 ) -> String {
+    expand_inline_anchors_checked(content, anchors, config, &mut Vec::new())
+}
+
+fn expand_inline_anchors_checked(
+    content: &str,
+    anchors: &HashMap<String, Anchor>,
+    config: &Config,
+    missing: &mut Vec<String>,
+) -> String {
     let re = Regex::new(r"\{anchor\}`([^`]+)`").unwrap();
+    // Collect missing names in a first pass
+    for caps in re.captures_iter(content) {
+        let name = &caps[1];
+        if !anchors.contains_key(name) {
+            missing.push(name.to_string());
+        }
+    }
     re.replace_all(content, |caps: &regex::Captures| {
         let name = &caps[1];
         match anchors.get(name) {
@@ -352,12 +385,29 @@ fn expand_inline_anchors(
     .into_owned()
 }
 
+#[cfg(test)]
 fn expand_block_anchors(
     content: &str,
     anchors: &HashMap<String, Anchor>,
     config: &Config,
 ) -> String {
+    expand_block_anchors_checked(content, anchors, config, &mut Vec::new())
+}
+
+fn expand_block_anchors_checked(
+    content: &str,
+    anchors: &HashMap<String, Anchor>,
+    config: &Config,
+    missing: &mut Vec<String>,
+) -> String {
     let re = Regex::new(r"(?m)^```\{anchor\}\s*\n([\s\S]*?)^```\s*$").unwrap();
+    for caps in re.captures_iter(content) {
+        let body = caps[1].trim();
+        let name = body.lines().next().unwrap_or("").trim();
+        if !anchors.contains_key(name) {
+            missing.push(name.to_string());
+        }
+    }
     re.replace_all(content, |caps: &regex::Captures| {
         let body = caps[1].trim();
         let name = body.lines().next().unwrap_or("").trim();

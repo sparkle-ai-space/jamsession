@@ -36,6 +36,7 @@ type SessionId = String;
 // DispatcherMessage
 // ---------------------------------------------------------------------------
 
+// ANCHOR: daemon-message
 pub(super) enum DispatcherMessage {
     // --- Pipe registration/teardown ---
     ClientRegistered {
@@ -82,6 +83,7 @@ pub(super) enum DispatcherMessage {
     },
     CwdHealthCheck,
 }
+// ANCHOR_END: daemon-message
 
 // ---------------------------------------------------------------------------
 // LifecycleState
@@ -285,6 +287,7 @@ impl<'scope> Dispatcher<'scope> {
     // Client disconnect
     // -----------------------------------------------------------------------
 
+    // ANCHOR: disconnect-and-idle
     fn handle_client_disconnected(&mut self, client_id: ClientId) {
         self.clients.remove(&client_id);
 
@@ -324,6 +327,7 @@ impl<'scope> Dispatcher<'scope> {
             session_id: Some(session_id),
         });
     }
+    // ANCHOR_END: disconnect-and-idle
 
     // -----------------------------------------------------------------------
     // Agent ready
@@ -415,6 +419,7 @@ impl<'scope> Dispatcher<'scope> {
     // Agent disconnected
     // -----------------------------------------------------------------------
 
+    // ANCHOR: handle-agent-exited
     fn handle_agent_disconnected(&mut self, agent_id: AgentId) {
         self.agents.remove(&agent_id);
 
@@ -433,11 +438,14 @@ impl<'scope> Dispatcher<'scope> {
         session.buffer.clear();
         tracing::warn!(session_id, "agent disconnected unexpectedly");
     }
+    // ANCHOR_END: handle-agent-exited
 
     // -----------------------------------------------------------------------
     // FromClient routing
     // -----------------------------------------------------------------------
 
+    // ANCHOR: dispatch-session-new
+    // ANCHOR: dispatch-session-load
     async fn handle_from_client(&mut self, client_id: ClientId, dispatch: Dispatch) {
         MatchDispatch::new(dispatch)
             .if_request(async |req: InitializeRequest, responder| {
@@ -472,6 +480,8 @@ impl<'scope> Dispatcher<'scope> {
             .await
             .ok();
     }
+    // ANCHOR_END: dispatch-session-new
+    // ANCHOR_END: dispatch-session-load
 
     fn route_to_agent(&self, client_id: ClientId, dispatch: Dispatch) {
         let Some(session_id) = self.client_to_session.get(&client_id) else {
@@ -493,6 +503,7 @@ impl<'scope> Dispatcher<'scope> {
     // Initialize
     // -----------------------------------------------------------------------
 
+    // ANCHOR: handle-initialize
     fn handle_initialize(
         &mut self,
         _client_id: ClientId,
@@ -552,11 +563,13 @@ impl<'scope> Dispatcher<'scope> {
             }
         });
     }
+    // ANCHOR_END: handle-initialize
 
     // -----------------------------------------------------------------------
     // ListSessions
     // -----------------------------------------------------------------------
 
+    // ANCHOR: handle-session-list
     fn handle_list_sessions(
         &self,
         req: ListSessionsRequest,
@@ -572,11 +585,13 @@ impl<'scope> Dispatcher<'scope> {
             .collect();
         let _ = responder.respond(ListSessionsResponse::new(session_infos));
     }
+    // ANCHOR_END: handle-session-list
 
     // -----------------------------------------------------------------------
     // Session/New
     // -----------------------------------------------------------------------
 
+    // ANCHOR: handle-session-new
     fn handle_session_new(
         &mut self,
         client_id: ClientId,
@@ -625,11 +640,13 @@ impl<'scope> Dispatcher<'scope> {
             Ok(())
         });
     }
+    // ANCHOR_END: handle-session-new
 
     // -----------------------------------------------------------------------
     // Session/Load
     // -----------------------------------------------------------------------
 
+    // ANCHOR: handle-session-load
     fn handle_session_load(
         &mut self,
         client_id: ClientId,
@@ -707,6 +724,7 @@ impl<'scope> Dispatcher<'scope> {
             let _ = responder.respond(LoadSessionResponse::new());
         }
     }
+    // ANCHOR_END: handle-session-load
 
     // -----------------------------------------------------------------------
     // Session/Resume
@@ -783,6 +801,7 @@ impl<'scope> Dispatcher<'scope> {
     // FromAgent routing
     // -----------------------------------------------------------------------
 
+    // ANCHOR: route-messages
     fn handle_from_agent(&mut self, agent_id: AgentId, dispatch: Dispatch) {
         let Some(session_id) = self.agent_to_session.get(&agent_id).cloned() else {
             tracing::warn!(agent_id, "dispatch from unknown agent");
@@ -806,6 +825,7 @@ impl<'scope> Dispatcher<'scope> {
             let _ = client.outgoing_tx.send(dispatch);
         }
     }
+    // ANCHOR_END: route-messages
 
     // -----------------------------------------------------------------------
     // Timers
@@ -864,6 +884,7 @@ impl<'scope> Dispatcher<'scope> {
     // CWD health check
     // -----------------------------------------------------------------------
 
+    // ANCHOR: cwd-health-check
     fn handle_cwd_health_check(&mut self) {
         let to_remove: Vec<SessionId> = self
             .sessions
@@ -888,6 +909,7 @@ impl<'scope> Dispatcher<'scope> {
             let _ = self.state.save(&self.state_path);
         }
     }
+    // ANCHOR_END: cwd-health-check
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -910,6 +932,7 @@ impl<'scope> Dispatcher<'scope> {
 // Client Pipe
 // ---------------------------------------------------------------------------
 
+// ANCHOR: handle-client
 pub(super) async fn client_pipe(
     stream: UnixStream,
     client_id: ClientId,
@@ -958,12 +981,15 @@ pub(super) async fn client_pipe(
             })
             .await;
 
+    // ANCHOR: client-disconnect
     if let Err(e) = result {
         tracing::debug!(client_id, error = %e, "client pipe ended");
     }
 
     let _ = dispatcher_tx.send(DispatcherMessage::ClientDisconnected { client_id });
+    // ANCHOR_END: client-disconnect
 }
+// ANCHOR_END: handle-client
 
 // ---------------------------------------------------------------------------
 // Agent Pipe

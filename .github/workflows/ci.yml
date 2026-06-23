@@ -120,8 +120,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - run: cargo +nightly generate-lockfile -Z minimal-versions
       - run: cargo +stable check --workspace --all-features --locked --keep-going
+  # Ensure mdbook anchors resolve (catches stale cross-references between docs and source)
+  mdbook:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@56545b37b57562edd73171cb6c62cc509db4c34e # v2.81.7
+        with:
+          tool: mdbook,mdbook-mermaid
+      - run: mdbook build
   ci-pass:
-    needs: [fmt, clippy, warnings, docsrs, build, features, lockfile, minimal-versions]
+    needs: [fmt, clippy, warnings, docsrs, build, features, lockfile, minimal-versions, mdbook]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:

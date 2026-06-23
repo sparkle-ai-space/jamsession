@@ -84,7 +84,7 @@ impl Daemon {
         let (dispatcher_tx, dispatcher_rx) =
             tokio::sync::mpsc::unbounded_channel::<DispatcherMessage>();
 
-        // CWD health check timer
+        // ANCHOR: cwd-health-check-timer
         {
             let tx = dispatcher_tx.clone();
             tokio::spawn(async move {
@@ -94,6 +94,7 @@ impl Daemon {
                 }
             });
         }
+        // ANCHOR_END: cwd-health-check-timer
 
         // Prepare socket
         if let Some(parent) = self.socket_path.parent() {
@@ -115,7 +116,7 @@ impl Daemon {
             let _ = tx.send(LifecycleEvent::Initialized);
         }
 
-        // Spawn accept loop
+        // ANCHOR: accept-loop
         {
             let accept_tx = dispatcher_tx.clone();
             tokio::spawn(async move {
@@ -136,6 +137,7 @@ impl Daemon {
                 }
             });
         }
+        // ANCHOR_END: accept-loop
 
         // Run dispatcher inside a scope for structured task spawning
         scope(
