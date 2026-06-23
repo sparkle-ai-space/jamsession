@@ -2,6 +2,9 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("scope closed")]
+    ScopeClosed,
+
     #[error("agent spawn failed: {0}")]
     AgentSpawn(String),
 
@@ -23,14 +26,17 @@ pub enum Error {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
-    #[error("failed to read state file: {0}")]
-    Read(std::io::Error),
-
     #[error("failed to write state file: {0}")]
     Write(std::io::Error),
 
     #[error("failed to parse state file: {0}")]
     Parse(serde_json::Error),
+}
+
+impl scope_tasks::SpawnError for Error {
+    fn scope_closed() -> Self {
+        Self::ScopeClosed
+    }
 }
 
 impl From<&Error> for agent_client_protocol::Error {

@@ -1534,9 +1534,10 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "futures",
  "lazy_static",
- "nix",
  "pkg-config",
+ "scope-tasks",
  "serde",
  "serde_json",
  "tempfile",
@@ -1568,9 +1569,12 @@ name = "jamsession-test"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
+ "anyhow",
  "expect-test",
+ "futures",
  "jamsession",
  "rhaicp",
+ "scope-tasks",
  "serde_json",
  "tempfile",
  "tokio",
@@ -2599,6 +2603,15 @@ dependencies = [
  "quote",
  "serde_derive_internals",
  "syn",
+]
+
+[[package]]
+name = "scope-tasks"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "tokio",
+ "tokio-stream",
 ]
 
 [[package]]
@@ -4036,6 +4049,10 @@ dependencies = [
  "libc",
  "rustix",
 ]
+
+[[package]]
+name = "xtask"
+version = "0.1.0"
 
 [[package]]
 name = "yoke"

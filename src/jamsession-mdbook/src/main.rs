@@ -87,7 +87,7 @@ struct Config {
     root: PathBuf,
     scan_dirs: Vec<PathBuf>,
     github_repo: String,
-    github_branch: String,
+    github_ref: String,
 }
 
 impl Config {
@@ -109,12 +109,85 @@ impl Config {
             pp_config.scan_dirs.iter().map(|s| root.join(s)).collect()
         };
 
+        let (repo, git_ref) = detect_git_context(&root, &pp_config);
+
         Ok(Config {
             root,
             scan_dirs,
-            github_repo: pp_config.github_repo,
-            github_branch: pp_config.github_branch,
+            github_repo: repo,
+            github_ref: git_ref,
         })
+    }
+}
+
+/// Detect the GitHub repo and ref from the git working tree.
+/// Uses the tracking remote to find the correct fork, and the current
+/// branch name for the ref (so links stay valid as commits move).
+fn detect_git_context(root: &Path, fallback: &PreprocessorConfig) -> (String, String) {
+    let tracking = tracking_remote_and_branch(root);
+
+    let (remote_url, branch) = match &tracking {
+        Some((url, branch)) => (Some(url.clone()), Some(branch.clone())),
+        None => (origin_remote_url(root), None),
+    };
+
+    let repo = remote_url
+        .and_then(|url| parse_github_repo(&url))
+        .unwrap_or_else(|| fallback.github_repo.clone());
+
+    let git_ref = branch.unwrap_or_else(|| fallback.github_branch.clone());
+
+    (repo, git_ref)
+}
+
+/// Get the remote URL and branch name for the current branch's upstream.
+/// Returns (remote_url, branch_name) — e.g. ("git@github.com:user/repo.git", "main").
+fn tracking_remote_and_branch(root: &Path) -> Option<(String, String)> {
+    // Returns something like "origin/main" or "nikomatsakis/conductor-like-arch"
+    let upstream = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+        .current_dir(root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())?;
+
+    let (remote, branch) = upstream.split_once('/')?;
+    let url = remote_url_by_name(root, remote)?;
+    Some((url, branch.to_string()))
+}
+
+/// Get the URL for the "origin" remote.
+fn origin_remote_url(root: &Path) -> Option<String> {
+    remote_url_by_name(root, "origin")
+}
+
+fn remote_url_by_name(root: &Path, name: &str) -> Option<String> {
+    std::process::Command::new("git")
+        .args(["remote", "get-url", name])
+        .current_dir(root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+/// Parse "owner/repo" from a GitHub remote URL.
+/// Handles: `git@github.com:owner/repo.git`, `https://github.com/owner/repo.git`
+fn parse_github_repo(url: &str) -> Option<String> {
+    let path = if let Some(rest) = url.strip_prefix("git@github.com:") {
+        rest
+    } else if url.contains("github.com/") {
+        url.split("github.com/").nth(1)?
+    } else {
+        return None;
+    };
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let parts: Vec<&str> = path.splitn(3, '/').collect();
+    if parts.len() >= 2 {
+        Some(format!("{}/{}", parts[0], parts[1]))
+    } else {
+        None
     }
 }
 
@@ -139,7 +212,7 @@ impl Anchor {
         let rel = self.relative_path(&config.root);
         format!(
             "https://github.com/{}/blob/{}/{}#L{}-L{}",
-            config.github_repo, config.github_branch, rel, self.line_start, self.line_end,
+            config.github_repo, config.github_ref, rel, self.line_start, self.line_end,
         )
     }
 
@@ -294,7 +367,7 @@ fn expand_block_anchors(
                 let url = anchor.github_url(config);
                 let lang = anchor.file_extension();
                 format!(
-                    "<figure>\n\n```{lang}\n{content}\n```\n\n<figcaption>\n\n[`{rel}:{start}-{end}`]({url})\n\n</figcaption>\n</figure>",
+                    "```{lang}\n{content}\n```\n\n*[`{rel}:{start}-{end}`]({url})*",
                     content = anchor.content,
                     start = anchor.line_start,
                     end = anchor.line_end,
@@ -318,7 +391,7 @@ mod tests {
             root: PathBuf::from("/project"),
             scan_dirs: vec![],
             github_repo: "user/repo".to_string(),
-            github_branch: "main".to_string(),
+            github_ref: "main".to_string(),
         }
     }
 
@@ -354,7 +427,7 @@ mod tests {
         let output = expand_block_anchors(input, &anchors, &config);
         assert!(output.contains("```rs"));
         assert!(output.contains("fn foo()"));
-        assert!(output.contains("figcaption"));
+        assert!(output.contains("src/lib.rs:10-15"));
     }
 
     #[test]
@@ -375,5 +448,29 @@ mod tests {
         ];
         let result = dedent(&lines);
         assert_eq!(result, "fn bar() {\n    42\n}");
+    }
+
+    #[test]
+    fn parse_github_repo_ssh() {
+        assert_eq!(
+            parse_github_repo("git@github.com:sparkle-ai-space/jamsession.git"),
+            Some("sparkle-ai-space/jamsession".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_github_repo_https() {
+        assert_eq!(
+            parse_github_repo("https://github.com/nikomatsakis/jamsession.git"),
+            Some("nikomatsakis/jamsession".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_github_repo_no_suffix() {
+        assert_eq!(
+            parse_github_repo("https://github.com/user/repo"),
+            Some("user/repo".to_string())
+        );
     }
 }
