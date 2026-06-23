@@ -1534,6 +1534,7 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "futures",
  "lazy_static",
  "pkg-config",
  "scope-tasks",

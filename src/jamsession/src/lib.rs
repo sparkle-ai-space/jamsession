@@ -4,6 +4,7 @@
 pub mod agent;
 pub mod daemon;
 mod dispatcher;
+mod eof_signal;
 pub mod error;
 pub mod logging;
 mod session;

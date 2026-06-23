@@ -13,9 +13,11 @@ use agent_client_protocol::{
     Agent, ByteStreams, Client, Dispatch, DynConnectTo, HandleDispatchFrom, Handled, Responder,
 };
 use chrono::Utc;
+use futures::StreamExt;
 use scope_tasks::TaskSpawner;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::agent::AgentFactory;
@@ -913,7 +915,7 @@ pub(super) async fn client_pipe(
     client_id: ClientId,
     dispatcher_tx: mpsc::UnboundedSender<DispatcherMessage>,
 ) {
-    let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<Dispatch>();
+    let (outgoing_tx, outgoing_rx) = mpsc::unbounded_channel::<Dispatch>();
 
     let _ = dispatcher_tx.send(DispatcherMessage::ClientRegistered {
         client_id,
@@ -922,6 +924,8 @@ pub(super) async fn client_pipe(
 
     let (read_half, write_half) = stream.into_split();
     let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
+    // Workaround for https://github.com/agentclientprotocol/rust-sdk/issues/223
+    let (transport, eof_rx) = crate::eof_signal::EofSignalingTransport::wrap(transport);
 
     let forwarder_tx = dispatcher_tx.clone();
     let result =
@@ -942,15 +946,18 @@ pub(super) async fn client_pipe(
                 agent_client_protocol::on_receive_dispatch!(),
             )
             .connect_with(transport, async move |cx| {
-                while let Some(dispatch) = outgoing_rx.recv().await {
+                let eof_fut = Box::pin(async {
+                    let _ = eof_rx.await;
+                });
+                let mut outgoing =
+                    std::pin::pin!(UnboundedReceiverStream::new(outgoing_rx).take_until(eof_fut));
+                while let Some(dispatch) = outgoing.next().await {
                     cx.send_proxied_message(dispatch)?;
                 }
                 Ok(())
             })
             .await;
 
-    // connect_with returns when the transport closes (EOF cancels main_fn via
-    // run_until) or when the outgoing channel is closed. Log transport errors.
     if let Err(e) = result {
         tracing::debug!(client_id, error = %e, "client pipe ended");
     }
@@ -989,9 +996,12 @@ async fn agent_pipe(
     responder: AgentReadyResponder,
 ) {
     let agent_id = spawn_request.agent_id;
-    let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<Dispatch>();
+    let (outgoing_tx, outgoing_rx) = mpsc::unbounded_channel::<Dispatch>();
     let responder_slot: Arc<std::sync::Mutex<Option<AgentReadyResponder>>> =
         Arc::new(std::sync::Mutex::new(Some(responder)));
+
+    // Workaround for https://github.com/agentclientprotocol/rust-sdk/issues/223
+    let (transport, eof_rx) = crate::eof_signal::EofSignalingTransport::wrap(transport);
 
     let result = Client
         .builder()
@@ -1099,7 +1109,12 @@ async fn agent_pipe(
                     }
                 }
 
-                while let Some(dispatch) = outgoing_rx.recv().await {
+                let eof_fut = Box::pin(async {
+                    let _ = eof_rx.await;
+                });
+                let mut outgoing =
+                    std::pin::pin!(UnboundedReceiverStream::new(outgoing_rx).take_until(eof_fut));
+                while let Some(dispatch) = outgoing.next().await {
                     cx.send_proxied_message(dispatch)?;
                 }
                 Ok(())
