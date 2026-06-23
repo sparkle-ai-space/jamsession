@@ -5,10 +5,8 @@ language = "en"
 src = "md"
 
 [preprocessor.anchor]
-command = "cargo run -p jamsession-mdbook --"
+command = "mdbook-ezanchor"
 scan-dirs = ["src"]
-github-repo = "nikomatsakis/jamsession"
-github-branch = "main"
 
 [preprocessor.mermaid]
 command = "mdbook-mermaid"

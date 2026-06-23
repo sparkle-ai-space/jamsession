@@ -26,15 +26,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install mdBook
+      - name: Install mdBook and preprocessors
         uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
         with:
-          tool: mdbook
-
-      - name: Install mdbook-mermaid
-        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
-        with:
-          tool: mdbook-mermaid
+          tool: mdbook,mdbook-mermaid,mdbook-ezanchor
 
       - name: Build book
         run: mdbook build

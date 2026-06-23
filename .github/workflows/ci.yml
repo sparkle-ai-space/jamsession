@@ -124,14 +124,21 @@ jobs:
   mdbook:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@56545b37b57562edd73171cb6c62cc509db4c34e # v2.81.7
+      - uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
         with:
-          tool: mdbook,mdbook-mermaid
-      - run: mdbook build
+          tool: mdbook,mdbook-mermaid,mdbook-ezanchor
+      - name: Build book and check for missing anchors
+        run: |
+          output=$(mdbook build 2>&1) || { echo "$output"; exit 1; }
+          if echo "$output" | grep -q "unknown anchor"; then
+            echo "$output" | grep "unknown anchor"
+            echo "::error::mdbook has unknown anchor references (see above)"
+            exit 1
+          fi
   ci-pass:
     needs: [fmt, clippy, warnings, docsrs, build, features, lockfile, minimal-versions, mdbook]
     if: ${{ !cancelled() }}
