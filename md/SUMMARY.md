@@ -10,7 +10,6 @@
 # Appendices
 
 - [Design and implementation](./design/README.md)
-  - [Daemon actor architecture](./design/daemon_actor.md)
   - [Key sequence diagrams](./design/sequence_diagrams.md)
     - [Flow: new session](./design/flow-new-session.md)
     - [Flow: reconnect (load/resume)](./design/flow-reconnect.md)

@@ -5,19 +5,19 @@ The daemon periodically checks whether each session's working directory still ex
 ```mermaid
 sequenceDiagram
     participant T as Timer (60s)
-    participant A as Actor
+    participant D as Dispatcher
 
-    T->>A: CwdHealthCheck
-    Note over A: Iterate sessions, check cwd.exists()
-    Note over A: Kill agent for deleted cwds
-    Note over A: Remove from state file, persist
+    T->>D: CwdHealthCheck
+    Note over D: Iterate sessions, check cwd.exists()
+    Note over D: Remove agent/client mappings for deleted cwds
+    Note over D: Remove from state file, persist
 ```
 
 ## How it works
 
 ### Timer
 
-A dedicated task sends `DaemonMessage::CwdHealthCheck` every 60 seconds:
+A dedicated task sends `DispatcherMessage::CwdHealthCheck` every 60 seconds:
 
 ```{anchor}
 cwd-health-check-timer
@@ -25,7 +25,7 @@ cwd-health-check-timer
 
 ### Cleanup logic
 
-The actor iterates all sessions, identifies those whose `cwd` no longer exists, kills their agents (drops the connection handle), removes them from the in-memory map and persistent state, and saves:
+The dispatcher iterates all sessions, identifies those whose `cwd` no longer exists, removes their agent and client mappings, removes them from the in-memory map and persistent state, and saves:
 
 ```{anchor}
 cwd-health-check
