@@ -36,12 +36,19 @@ impl Config {
         let path = config_dir.join("config.toml");
         let contents = match std::fs::read_to_string(&path) {
             Ok(c) => c,
-            Err(_) => return Self::default(),
+            Err(_) => {
+                tracing::info!(path = %path.display(), "no config.toml found, using defaults");
+                return Self::default();
+            }
         };
         match toml::from_str(&contents) {
-            Ok(config) => config,
+            Ok(config) => {
+                let config: Self = config;
+                tracing::info!(path = %path.display(), ?config, "loaded config");
+                config
+            }
             Err(e) => {
-                tracing::warn!("invalid config.toml, using defaults: {e}");
+                tracing::warn!(path = %path.display(), "invalid config.toml, using defaults: {e}");
                 Self::default()
             }
         }
@@ -52,11 +59,25 @@ impl Config {
             Some(AgentConfig {
                 custom: Some(custom),
                 ..
-            }) => Arc::new(CustomAgentFactory { custom }),
+            }) => {
+                tracing::info!(
+                    path = %custom.path.display(),
+                    args = ?custom.args,
+                    env = ?custom.env,
+                    "using custom agent factory"
+                );
+                Arc::new(CustomAgentFactory { custom })
+            }
             Some(AgentConfig {
                 name: Some(name), ..
-            }) => Arc::new(crate::agent::AcprFactory::new(name)),
-            _ => Arc::new(crate::agent::AcprFactory::default()),
+            }) => {
+                tracing::info!(name = %name, "using acpr agent factory");
+                Arc::new(crate::agent::AcprFactory::new(name))
+            }
+            _ => {
+                tracing::info!("using default acpr agent factory (claude-acp)");
+                Arc::new(crate::agent::AcprFactory::default())
+            }
         }
     }
 }
@@ -68,7 +89,7 @@ struct CustomAgentFactory {
 impl AgentFactory for CustomAgentFactory {
     fn create_transport(
         &self,
-        _session_id: &str,
+        session_id: &str,
         _cwd: &Path,
         _mcp_servers: &[McpServer],
     ) -> Result<DynConnectTo<Client>, Error> {
@@ -78,6 +99,14 @@ impl AgentFactory for CustomAgentFactory {
             .iter()
             .map(|(k, v)| EnvVariable::new(k.clone(), v.clone()))
             .collect();
+
+        tracing::info!(
+            session_id,
+            command = %self.custom.path.display(),
+            args = ?self.custom.args,
+            env_count = env.len(),
+            "spawning custom agent"
+        );
 
         let server = McpServerStdio::new("custom-agent", &self.custom.path)
             .args(self.custom.args.clone())

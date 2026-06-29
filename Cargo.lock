@@ -1536,6 +1536,7 @@ dependencies = [
  "dirs",
  "futures",
  "lazy_static",
+ "libc",
  "pkg-config",
  "scope-tasks",
  "serde",

@@ -29,6 +29,10 @@ impl SessionFileLayer {
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".jamsession")
             .join("sessions");
+        Self::new_with_base(base_dir)
+    }
+
+    pub fn new_with_base(base_dir: PathBuf) -> Self {
         let _ = fs::create_dir_all(&base_dir);
         Self {
             base_dir,
