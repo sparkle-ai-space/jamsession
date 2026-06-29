@@ -21,12 +21,12 @@ pub trait AgentFactory: Send + Sync + 'static {
 }
 
 /// Production factory: spawns agent via acpr registry.
-pub(super) struct AcprFactory {
+pub struct AcprFactory {
     name: String,
 }
 
 impl AcprFactory {
-    fn new(name: impl Into<String>) -> Self {
+    pub fn new(name: impl Into<String>) -> Self {
         Self { name: name.into() }
     }
 }
