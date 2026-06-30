@@ -5,8 +5,9 @@ use std::sync::Arc;
 use agent_client_protocol::schema::{
     InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
     LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionRequest, NewSessionResponse,
-    ProtocolVersion, ResumeSessionRequest, ResumeSessionResponse, SessionId as AcpSessionId,
-    SessionInfo,
+    ProtocolVersion, ResumeSessionRequest, ResumeSessionResponse,
+    SessionConfigOptionCategory, SessionId as AcpSessionId, SessionInfo,
+    SetSessionConfigOptionRequest,
 };
 use agent_client_protocol::util::MatchDispatch;
 use agent_client_protocol::{
@@ -165,6 +166,7 @@ pub(super) struct Dispatcher<'scope> {
     idle_timeout: std::time::Duration,
     quiescence_timeout: std::time::Duration,
     send_guidelines: bool,
+    default_model: Option<String>,
     event_tx: Option<LifecycleEventSender>,
     dispatcher_tx: mpsc::UnboundedSender<DispatcherMessage>,
     next_agent_id: u64,
@@ -179,6 +181,7 @@ impl<'scope> Dispatcher<'scope> {
         idle_timeout: std::time::Duration,
         quiescence_timeout: std::time::Duration,
         send_guidelines: bool,
+        default_model: Option<String>,
         event_tx: Option<LifecycleEventSender>,
         dispatcher_tx: mpsc::UnboundedSender<DispatcherMessage>,
     ) -> crate::error::Result<Self> {
@@ -195,6 +198,7 @@ impl<'scope> Dispatcher<'scope> {
             idle_timeout,
             quiescence_timeout,
             send_guidelines,
+            default_model,
             event_tx,
             dispatcher_tx,
             next_agent_id: 1,
@@ -615,6 +619,7 @@ impl<'scope> Dispatcher<'scope> {
         let dispatcher_tx = self.dispatcher_tx.clone();
         let agent_id = self.generate_agent_id();
         let send_guidelines = self.send_guidelines;
+        let default_model = self.default_model.clone();
 
         let transport = match factory.create_transport("", &req.cwd, &req.mcp_servers) {
             Ok(t) => t,
@@ -638,6 +643,7 @@ impl<'scope> Dispatcher<'scope> {
                         mcp_servers: req.mcp_servers,
                     },
                     send_guidelines,
+                    default_model,
                 },
                 AgentReadyResponder::NewSession(responder),
             )
@@ -757,6 +763,7 @@ impl<'scope> Dispatcher<'scope> {
         let factory = self.factory.clone();
         let dispatcher_tx = self.dispatcher_tx.clone();
         let agent_id = self.generate_agent_id();
+        let default_model = self.default_model.clone();
 
         let transport = match factory.create_transport(&session_id, &cwd, &mcp_servers) {
             Ok(t) => t,
@@ -782,6 +789,7 @@ impl<'scope> Dispatcher<'scope> {
                         mcp_servers,
                     },
                     send_guidelines: false,
+                    default_model,
                 },
                 responder,
             )
@@ -1024,6 +1032,7 @@ struct AgentSpawnRequest {
     agent_id: AgentId,
     request: SessionRequest,
     send_guidelines: bool,
+    default_model: Option<String>,
 }
 
 async fn agent_pipe(
@@ -1064,6 +1073,16 @@ async fn agent_pipe(
                             .await?;
 
                         let session_id = resp.session_id.0.to_string();
+
+                        if let Some(ref desired_model) = spawn_request.default_model {
+                            set_model_config_option(
+                                &cx,
+                                &session_id,
+                                desired_model,
+                                resp.config_options.as_deref(),
+                            )
+                            .await;
+                        }
 
                         if spawn_request.send_guidelines {
                             use agent_client_protocol::schema::{
@@ -1154,6 +1173,65 @@ async fn agent_pipe(
     }
 
     let _ = dispatcher_tx.send(DispatcherMessage::AgentDisconnected { agent_id });
+}
+
+// ---------------------------------------------------------------------------
+// Model configuration
+// ---------------------------------------------------------------------------
+
+use agent_client_protocol::schema::SessionConfigKind;
+
+async fn set_model_config_option(
+    cx: &agent_client_protocol::ConnectionTo<agent_client_protocol::Agent>,
+    session_id: &str,
+    desired_model: &str,
+    config_options: Option<&[agent_client_protocol::schema::SessionConfigOption]>,
+) {
+    let Some(options) = config_options else {
+        tracing::debug!("no config options returned by agent, skipping model set");
+        return;
+    };
+
+    let model_option = options.iter().find(|opt| {
+        opt.category == Some(SessionConfigOptionCategory::Model)
+    });
+
+    let Some(model_option) = model_option else {
+        tracing::debug!("no model config option found, skipping model set");
+        return;
+    };
+
+    let SessionConfigKind::Select(ref select) = model_option.kind else {
+        tracing::debug!("model config option is not a select type, skipping");
+        return;
+    };
+
+    if &*select.current_value.0 == desired_model {
+        tracing::debug!(model = desired_model, "model already set to desired value");
+        return;
+    }
+
+    tracing::info!(
+        from = %select.current_value.0,
+        to = desired_model,
+        "setting model via session/set_config_option"
+    );
+
+    use agent_client_protocol::schema::SessionConfigValueId;
+    let req = SetSessionConfigOptionRequest::new(
+        AcpSessionId::new(session_id),
+        model_option.id.clone(),
+        SessionConfigValueId::new(desired_model),
+    );
+
+    match cx.send_request(req).block_task().await {
+        Ok(_resp) => {
+            tracing::info!(model = desired_model, "model set successfully");
+        }
+        Err(e) => {
+            tracing::warn!(model = desired_model, error = %e, "failed to set model");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

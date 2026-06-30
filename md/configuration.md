@@ -15,6 +15,10 @@ idle_timeout_secs = 900
 # Quiescence timeout in seconds (default: 10)
 quiescence_timeout_secs = 10
 
+# Default model to select when creating new sessions (optional).
+# Uses session/set_config_option to set the model after session creation.
+default-model = "default"
+
 # Environment variables set on the daemon process at startup.
 # These are inherited by all spawned agent processes.
 [daemon.env]
@@ -41,6 +45,7 @@ The `[daemon]` section controls daemon-level settings that apply before any sess
 | `log_filter` | Tracing filter directive (default: `"info"`). Overridden by `RUST_LOG` env var if set. |
 | `idle_timeout_secs` | Seconds of inactivity before killing the agent process (default: `900`) |
 | `quiescence_timeout_secs` | Seconds of pipe silence after client disconnect before starting the idle timer (default: `10`) |
+| `default-model` | Model to select via `session/set_config_option` after creating a session. Looks for the config option with `category: "model"`. Skipped if unset or if already the current value. |
 | `env` | Key-value pairs set as environment variables on the daemon process at startup. Inherited by all spawned child processes (agents, npx, etc.). |
 
 ### Agent

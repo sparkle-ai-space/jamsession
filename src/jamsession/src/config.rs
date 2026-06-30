@@ -21,6 +21,8 @@ pub struct DaemonConfig {
     pub log_filter: Option<String>,
     pub idle_timeout_secs: Option<u64>,
     pub quiescence_timeout_secs: Option<u64>,
+    #[serde(alias = "default-model")]
+    pub default_model: Option<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
 }
@@ -45,6 +47,10 @@ pub struct CustomAgent {
 impl Config {
     pub fn log_filter(&self) -> Option<&str> {
         self.daemon.as_ref()?.log_filter.as_deref()
+    }
+
+    pub fn default_model(&self) -> Option<&str> {
+        self.daemon.as_ref()?.default_model.as_deref()
     }
 
     pub fn idle_timeout(&self) -> std::time::Duration {
