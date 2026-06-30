@@ -16,13 +16,13 @@ fn mock_agent_binary() -> PathBuf {
 
 async fn start_daemon(
     socket_path: &std::path::Path,
-    state_path: &std::path::Path,
+    db_path: &std::path::Path,
 ) -> tokio::task::JoinHandle<()> {
     let socket_path_clone = socket_path.to_path_buf();
-    let state_path = state_path.to_path_buf();
+    let db_path = db_path.to_path_buf();
     let mock_binary = mock_agent_binary();
     let handle = tokio::spawn(async move {
-        let daemon = jamsession::daemon::Daemon::new_with_paths(&state_path, &socket_path_clone)
+        let daemon = jamsession::daemon::Daemon::new_with_paths(&db_path, &socket_path_clone)
             .with_factory(Arc::new(BinaryFactory::new(mock_binary)));
         let _ = daemon.run().await;
     });
@@ -71,9 +71,9 @@ async fn send_request(stream: &mut UnixStream, request: serde_json::Value) -> se
 async fn new_session_creates_session_and_returns_id() {
     let dir = tempfile::TempDir::new().unwrap();
     let socket_path = dir.path().join("daemon.sock");
-    let state_path = dir.path().join("state.json");
+    let db_path = dir.path().join("jamsession.db");
 
-    let _handle = start_daemon(&socket_path, &state_path).await;
+    let _handle = start_daemon(&socket_path, &db_path).await;
 
     let mut stream = UnixStream::connect(&socket_path).await.unwrap();
 
@@ -93,17 +93,16 @@ async fn new_session_creates_session_and_returns_id() {
 
     let result = response.get("result").expect("expected result");
     let session_id = result["sessionId"].as_str().unwrap();
-    // T041: session ID now comes from the agent (mock returns "mock_sess_<cwd>")
     assert!(!session_id.is_empty(), "got empty session id");
 }
 
 #[tokio::test]
-async fn new_session_persists_to_state_file() {
+async fn new_session_persists_to_database() {
     let dir = tempfile::TempDir::new().unwrap();
     let socket_path = dir.path().join("daemon.sock");
-    let state_path = dir.path().join("state.json");
+    let db_path = dir.path().join("jamsession.db");
 
-    let _handle = start_daemon(&socket_path, &state_path).await;
+    let _handle = start_daemon(&socket_path, &db_path).await;
 
     let mut stream = UnixStream::connect(&socket_path).await.unwrap();
 
@@ -124,20 +123,19 @@ async fn new_session_persists_to_state_file() {
         .unwrap()
         .to_string();
 
-    let state_contents = std::fs::read_to_string(&state_path).unwrap();
-    let state: serde_json::Value = serde_json::from_str(&state_contents).unwrap();
-    let sessions = state["sessions"].as_array().unwrap();
+    let store = jamsession::db::Store::open(&db_path).await.unwrap();
+    let sessions = store.list_sessions(None).await.unwrap();
     assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions[0]["session_id"], session_id);
+    assert_eq!(sessions[0].session_id, session_id);
 }
 
 #[tokio::test]
 async fn session_list_shows_created_session() {
     let dir = tempfile::TempDir::new().unwrap();
     let socket_path = dir.path().join("daemon.sock");
-    let state_path = dir.path().join("state.json");
+    let db_path = dir.path().join("jamsession.db");
 
-    let _handle = start_daemon(&socket_path, &state_path).await;
+    let _handle = start_daemon(&socket_path, &db_path).await;
 
     let mut stream = UnixStream::connect(&socket_path).await.unwrap();
 
@@ -178,9 +176,9 @@ async fn session_list_shows_created_session() {
 async fn load_nonexistent_session_returns_error() {
     let dir = tempfile::TempDir::new().unwrap();
     let socket_path = dir.path().join("daemon.sock");
-    let state_path = dir.path().join("state.json");
+    let db_path = dir.path().join("jamsession.db");
 
-    let _handle = start_daemon(&socket_path, &state_path).await;
+    let _handle = start_daemon(&socket_path, &db_path).await;
 
     let mut stream = UnixStream::connect(&socket_path).await.unwrap();
 
@@ -206,9 +204,9 @@ async fn load_nonexistent_session_returns_error() {
 async fn new_session_with_invalid_cwd_returns_error() {
     let dir = tempfile::TempDir::new().unwrap();
     let socket_path = dir.path().join("daemon.sock");
-    let state_path = dir.path().join("state.json");
+    let db_path = dir.path().join("jamsession.db");
 
-    let _handle = start_daemon(&socket_path, &state_path).await;
+    let _handle = start_daemon(&socket_path, &db_path).await;
 
     let mut stream = UnixStream::connect(&socket_path).await.unwrap();
 
@@ -234,9 +232,9 @@ async fn new_session_with_invalid_cwd_returns_error() {
 async fn load_session_after_create() {
     let dir = tempfile::TempDir::new().unwrap();
     let socket_path = dir.path().join("daemon.sock");
-    let state_path = dir.path().join("state.json");
+    let db_path = dir.path().join("jamsession.db");
 
-    let _handle = start_daemon(&socket_path, &state_path).await;
+    let _handle = start_daemon(&socket_path, &db_path).await;
 
     // Create session on first connection
     let mut stream1 = UnixStream::connect(&socket_path).await.unwrap();
@@ -280,9 +278,9 @@ async fn load_session_after_create() {
 async fn resume_session_after_create() {
     let dir = tempfile::TempDir::new().unwrap();
     let socket_path = dir.path().join("daemon.sock");
-    let state_path = dir.path().join("state.json");
+    let db_path = dir.path().join("jamsession.db");
 
-    let _handle = start_daemon(&socket_path, &state_path).await;
+    let _handle = start_daemon(&socket_path, &db_path).await;
 
     // Create session
     let mut stream1 = UnixStream::connect(&socket_path).await.unwrap();

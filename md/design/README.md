@@ -27,13 +27,13 @@ Each page includes anchor code references that link directly to the source.
 
 **Timers as messages**: Instead of spawning timer tasks that grab mutexes, the dispatcher spawns lightweight tasks that simply sleep and then send `AgentQuiescent` / `IdleTimeoutElapsed` back to the dispatcher channel. The dispatcher checks whether the timer is still relevant (client may have reconnected) before acting.
 
-**Agent pipe isolation**: Each live agent has a dedicated task (`agent_pipe`) spawned by the dispatcher. The task reads from the agent's transport and forwards dispatches as `FromAgent { agent_id, dispatch }` into the dispatcher channel. The dispatcher decides what to do with each message (buffer it, forward to client, update lifecycle state). If the agent process exits, the task sends `AgentDisconnected`.
+**Agent pipe isolation**: Each live agent has a dedicated task (`agent_pipe`) spawned by the dispatcher. The task reads from the agent's transport and forwards dispatches as `FromAgent { agent_id, dispatch }` into the dispatcher channel. The dispatcher decides what to do with each message (persist it, forward to client, update lifecycle state). If the agent process exits, the task sends `AgentDisconnected`.
 
 ## Key concepts
 
-- **Ephemeral agents** — Agent processes are disposable. They can be killed after a turn completes. On respawn, the daemon sends `session/load` and the agent reconstructs state from its own store. The daemon never owns conversation history.
+- **Ephemeral agents** — Agent processes are disposable. They can be killed after a turn completes. On respawn, the daemon sends `session/resume`; conversation history is owned and replayed by the daemon.
 
-- **In-memory buffer** — While an agent is alive, the dispatcher records all notifications flowing through the bridge. This serves `session/load` from late-joining clients when the agent is already running — the dispatcher replays the buffer instead of asking the agent to replay.
+- **SQLite message store** — Session metadata and agent notifications are persisted in `jamsession.db`. Client `session/load` always replays notifications from SQLite, whether the agent is alive or needs to be respawned.
 
 - **Multiple clients per session** — Multiple client connections can be active on a session simultaneously (`client_ids: Vec<ClientId>`). Outgoing messages from the agent are routed to the most-recently-connected client (`.last()`).
 
@@ -44,10 +44,10 @@ Each page includes anchor code references that link directly to the source.
 | Module | File | Role |
 |--------|------|------|
 | `dispatcher` | `src/dispatcher.rs` | Central dispatcher: message types, session state, routing, timers, client/agent pipes |
-| `daemon` | `src/daemon.rs` | Socket listener, accept loop, scope-based task management |
+| `daemon` | `src/daemon.rs` | Socket listener, database opening, accept loop, scope-based task management |
+| `db` | `src/db.rs` | Toasty models and SQLite-backed session/message persistence |
 | `agent` | `src/agent.rs` | Agent factory trait, transport creation |
 | `session` | `src/session.rs` | `LifecycleEvent` enum (observable outcomes for tests/tracing) |
-| `state` | `src/state.rs` | Persistent state file (session registry) |
 | `eof_signal` | `src/eof_signal.rs` | `EofSignalingTransport` wrapper for disconnect detection |
 | `error` | `src/error.rs` | Error types |
 | `logging` | `src/logging.rs` | Per-session log file routing via tracing layer |

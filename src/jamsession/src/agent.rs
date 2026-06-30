@@ -7,7 +7,7 @@ use agent_client_protocol::{AcpAgent, Client, DynConnectTo};
 use crate::error::Error;
 
 /// Factory for creating agent connections. The daemon calls this when
-/// a session needs an agent (session/new, session/load with dead agent).
+/// a session needs an agent (session/new or session/resume with a dead agent).
 ///
 /// The factory returns a type-erased transport; the caller connects to it
 /// via `client_cx.spawn_connection(...)`.

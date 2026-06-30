@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand};
 use jamsession::config::Config;
 use jamsession::daemon::Daemon;
+use jamsession::db::Store;
 
 #[derive(Parser)]
 #[command(name = "jamsession", about = "Agent daemon for managing ACP sessions")]
@@ -19,9 +20,9 @@ struct Cli {
 enum Command {
     /// Run the daemon (default)
     Daemon {
-        /// Path to the state file
+        /// Path to the SQLite database
         #[arg(long)]
-        state_path: Option<PathBuf>,
+        db_path: Option<PathBuf>,
     },
     /// Run as stdio ACP client (connects to daemon)
     Acp,
@@ -63,19 +64,27 @@ async fn main() {
     let cli = Cli::parse();
     let config_dir = cli.config_dir.unwrap_or_else(default_config_dir);
 
-    match cli.command.unwrap_or(Command::Daemon { state_path: None }) {
-        Command::Daemon { state_path } => {
+    match cli.command.unwrap_or(Command::Daemon { db_path: None }) {
+        Command::Daemon { db_path } => {
             init_daemon_logging(&config_dir);
 
             let config = Config::load(&config_dir);
             let factory = config.into_factory();
 
-            let state_path = state_path.unwrap_or_else(|| config_dir.join("state.json"));
+            let db_path = db_path.unwrap_or_else(|| config_dir.join("jamsession.db"));
             let socket_path = config_dir.join("daemon.sock");
 
             write_pid_file(&config_dir);
 
-            let daemon = Daemon::new_with_paths(&state_path, &socket_path).with_factory(factory);
+            let store = match Store::open(&db_path).await {
+                Ok(store) => store,
+                Err(e) => {
+                    tracing::error!("failed to open database: {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            let daemon = Daemon::new_with_store(store, &socket_path).with_factory(factory);
 
             let shutdown = tokio::signal::ctrl_c();
             tokio::select! {

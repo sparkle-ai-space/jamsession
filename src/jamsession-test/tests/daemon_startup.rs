@@ -16,13 +16,13 @@ fn mock_agent_binary() -> PathBuf {
 
 async fn start_daemon(
     socket_path: &std::path::Path,
-    state_path: &std::path::Path,
+    db_path: &std::path::Path,
 ) -> tokio::task::JoinHandle<()> {
     let socket_path_clone = socket_path.to_path_buf();
-    let state_path = state_path.to_path_buf();
+    let db_path = db_path.to_path_buf();
     let mock_binary = mock_agent_binary();
     let handle = tokio::spawn(async move {
-        let daemon = jamsession::daemon::Daemon::new_with_paths(&state_path, &socket_path_clone)
+        let daemon = jamsession::daemon::Daemon::new_with_paths(&db_path, &socket_path_clone)
             .with_factory(Arc::new(BinaryFactory::new(mock_binary)));
         let _ = daemon.run().await;
     });
@@ -40,9 +40,9 @@ async fn start_daemon(
 async fn daemon_creates_socket_file() {
     let dir = tempfile::TempDir::new().unwrap();
     let socket_path = dir.path().join("daemon.sock");
-    let state_path = dir.path().join("state.json");
+    let db_path = dir.path().join("jamsession.db");
 
-    let _handle = start_daemon(&socket_path, &state_path).await;
+    let _handle = start_daemon(&socket_path, &db_path).await;
     assert!(socket_path.exists());
 }
 
@@ -50,9 +50,9 @@ async fn daemon_creates_socket_file() {
 async fn daemon_accepts_connection_and_responds_to_initialize() {
     let dir = tempfile::TempDir::new().unwrap();
     let socket_path = dir.path().join("daemon.sock");
-    let state_path = dir.path().join("state.json");
+    let db_path = dir.path().join("jamsession.db");
 
-    let _handle = start_daemon(&socket_path, &state_path).await;
+    let _handle = start_daemon(&socket_path, &db_path).await;
 
     let mut stream = UnixStream::connect(&socket_path).await.unwrap();
 
@@ -90,9 +90,9 @@ async fn daemon_accepts_connection_and_responds_to_initialize() {
 async fn session_list_returns_empty() {
     let dir = tempfile::TempDir::new().unwrap();
     let socket_path = dir.path().join("daemon.sock");
-    let state_path = dir.path().join("state.json");
+    let db_path = dir.path().join("jamsession.db");
 
-    let _handle = start_daemon(&socket_path, &state_path).await;
+    let _handle = start_daemon(&socket_path, &db_path).await;
 
     let mut stream = UnixStream::connect(&socket_path).await.unwrap();
 
