@@ -2,6 +2,7 @@
 #![deny(unsafe_code)] // Unsafe code does not belond in this crate. Avoid it or, if truly needed, create a carefully thought out abstraction.
 
 pub mod agent;
+pub mod config;
 pub mod daemon;
 mod dispatcher;
 mod eof_signal;

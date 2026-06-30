@@ -1,12 +1,16 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
+use jamsession::config::Config;
 use jamsession::daemon::Daemon;
-use jamsession::state::DaemonState;
 
 #[derive(Parser)]
 #[command(name = "jamsession", about = "Agent daemon for managing ACP sessions")]
 struct Cli {
+    /// Override the config/data directory (default: ~/.jamsession)
+    #[arg(long, global = true)]
+    config_dir: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -21,23 +25,19 @@ enum Command {
     },
     /// Run as stdio ACP client (connects to daemon)
     Acp,
+    /// Kill a running daemon
+    Kill,
 }
 
-/// T042+T043: Set up file-based logging to ~/.jamsession/daemon.log
-/// and per-session routing to ~/.jamsession/sessions/<id>/session.log
-fn init_daemon_logging() {
+fn init_daemon_logging(config_dir: &Path) {
     use jamsession::logging::SessionFileLayer;
     use tracing_subscriber::EnvFilter;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    let log_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".jamsession");
+    let _ = std::fs::create_dir_all(config_dir);
 
-    let _ = std::fs::create_dir_all(&log_dir);
-
-    let file_appender = tracing_appender::rolling::daily(&log_dir, "daemon.log");
+    let file_appender = tracing_appender::rolling::daily(config_dir, "daemon.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
     // Leak the guard so it lives for the process lifetime
@@ -48,19 +48,34 @@ fn init_daemon_logging() {
     tracing_subscriber::registry()
         .with(filter)
         .with(tracing_subscriber::fmt::layer().with_writer(non_blocking))
-        .with(SessionFileLayer::new())
+        .with(SessionFileLayer::new_with_base(config_dir.join("sessions")))
         .init();
+}
+
+fn default_config_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".jamsession")
 }
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    let config_dir = cli.config_dir.unwrap_or_else(default_config_dir);
+
     match cli.command.unwrap_or(Command::Daemon { state_path: None }) {
         Command::Daemon { state_path } => {
-            init_daemon_logging();
+            init_daemon_logging(&config_dir);
 
-            let state_path = state_path.unwrap_or_else(DaemonState::state_path);
-            let daemon = Daemon::new(&state_path);
+            let config = Config::load(&config_dir);
+            let factory = config.into_factory();
+
+            let state_path = state_path.unwrap_or_else(|| config_dir.join("state.json"));
+            let socket_path = config_dir.join("daemon.sock");
+
+            write_pid_file(&config_dir);
+
+            let daemon = Daemon::new_with_paths(&state_path, &socket_path).with_factory(factory);
 
             let shutdown = tokio::signal::ctrl_c();
             tokio::select! {
@@ -77,18 +92,21 @@ async fn main() {
         }
         Command::Acp => {
             tracing_subscriber::fmt::init();
-            run_acp_mode().await;
+            run_acp_mode(&config_dir).await;
+        }
+        Command::Kill => {
+            kill_daemon(&config_dir);
         }
     }
 }
 
-async fn run_acp_mode() {
-    let socket_path = Daemon::socket_path();
+async fn run_acp_mode(config_dir: &Path) {
+    let socket_path = config_dir.join("daemon.sock");
 
     // Auto-start daemon if socket doesn't exist
     if !socket_path.exists() {
         tracing::info!("daemon not running, attempting to start...");
-        if let Err(e) = auto_start_daemon().await {
+        if let Err(e) = auto_start_daemon(config_dir, &socket_path).await {
             tracing::error!("failed to auto-start daemon: {e}");
             std::process::exit(1);
         }
@@ -117,17 +135,21 @@ async fn run_acp_mode() {
     }
 }
 
-async fn auto_start_daemon() -> Result<(), Box<dyn std::error::Error>> {
+async fn auto_start_daemon(
+    config_dir: &Path,
+    socket_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     let exe = std::env::current_exe()?;
-    std::process::Command::new(exe)
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--config-dir")
+        .arg(config_dir)
         .arg("daemon")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
+        .stderr(std::process::Stdio::null());
+    cmd.spawn()?;
 
     // Wait for socket to appear
-    let socket_path = Daemon::socket_path();
     for _ in 0..50 {
         if socket_path.exists() {
             return Ok(());
@@ -136,4 +158,46 @@ async fn auto_start_daemon() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Err("daemon did not start in time".into())
+}
+
+fn write_pid_file(config_dir: &Path) {
+    let pid_path = config_dir.join("daemon.pid");
+    let _ = std::fs::write(&pid_path, std::process::id().to_string());
+}
+
+fn kill_daemon(config_dir: &Path) {
+    let pid_path = config_dir.join("daemon.pid");
+    let pid_str = match std::fs::read_to_string(&pid_path) {
+        Ok(s) => s,
+        Err(_) => {
+            eprintln!("no daemon.pid found in {}", config_dir.display());
+            std::process::exit(1);
+        }
+    };
+
+    let pid: i32 = match pid_str.trim().parse() {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("invalid pid in {}", pid_path.display());
+            std::process::exit(1);
+        }
+    };
+
+    #[allow(unsafe_code)]
+    let result = unsafe { libc::kill(pid, libc::SIGTERM) };
+
+    if result == 0 {
+        eprintln!("sent SIGTERM to daemon (pid {pid})");
+        let _ = std::fs::remove_file(&pid_path);
+    } else {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ESRCH) {
+            eprintln!("daemon not running (stale pid file)");
+            let _ = std::fs::remove_file(&pid_path);
+            let _ = std::fs::remove_file(config_dir.join("daemon.sock"));
+        } else {
+            eprintln!("failed to kill daemon (pid {pid}): {err}");
+            std::process::exit(1);
+        }
+    }
 }

@@ -7,6 +7,14 @@
 
 - [Configuration](./configuration.md)
 
+# RFDs
+
+- [About RFDs](./rfds/README.md)
+- [Accepted](./rfds/accepted.md)
+  - [Session persistence](./rfds/session-persistence/README.md)
+- [Completed](./rfds/completed.md)
+  - [RFD process](./rfds/rfd-process/README.md)
+
 # Appendices
 
 - [Design and implementation](./design/README.md)

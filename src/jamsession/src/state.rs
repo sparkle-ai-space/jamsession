@@ -35,13 +35,6 @@ impl DaemonState {
         }
     }
 
-    pub fn state_path() -> PathBuf {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".jamsession")
-            .join("state.json")
-    }
-
     pub(super) fn load(path: &Path) -> Self {
         let contents = match std::fs::read_to_string(path) {
             Ok(c) => c,

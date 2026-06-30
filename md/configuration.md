@@ -7,7 +7,31 @@ Jamsession reads configuration from `~/.jamsession/config.toml` on startup. If t
 ```toml
 # Log verbosity: error, warn, info, debug, trace
 log_level = "info"
+
+# Agent configuration (pick one of the two forms below)
+[agent]
+# Use an agent registered in the acpr registry:
+name = "claude-acp"
+
+# Or use a custom binary:
+# [agent.custom]
+# path = "/usr/local/bin/my-agent"
+# args = ["--verbose"]
+# env = { MY_KEY = "value" }
 ```
+
+### Agent
+
+The `[agent]` section controls which agent process the daemon spawns for sessions.
+
+| Field | Description |
+|-------|-------------|
+| `name` | Look up the agent by name in the [acpr](https://crates.io/crates/acpr) registry (default: `"claude-acp"`) |
+| `custom.path` | Path to an agent binary (mutually exclusive with `name`) |
+| `custom.args` | Arguments passed to the custom binary (optional) |
+| `custom.env` | Environment variables set when launching the custom binary (optional) |
+
+If neither `name` nor `custom` is specified, the daemon defaults to `name = "claude-acp"`.
 
 ### Log levels
 
@@ -32,12 +56,24 @@ log_level = "info"
 ## CLI options
 
 ```
+jamsession [OPTIONS] [COMMAND]
+
+Options:
+    --config-dir <PATH>    Override the config/data directory (default: ~/.jamsession)
+    -h, --help             Print help
+
+Commands:
+    daemon    Run the daemon (default)
+    acp       Run as stdio ACP client (connects to daemon)
+
 jamsession daemon [OPTIONS]
 
 Options:
     --state-path <PATH>    Override the state file location
     -h, --help             Print help
 ```
+
+The `--config-dir` flag redirects all file paths (socket, state, config, logs) to the given directory. Useful for running isolated test instances.
 
 ## Environment variables
 

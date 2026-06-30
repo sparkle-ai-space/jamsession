@@ -22,18 +22,6 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    pub fn new(state_path: &std::path::Path) -> Self {
-        Self {
-            socket_path: Self::socket_path(),
-            state_path: state_path.to_path_buf(),
-            factory: Arc::new(crate::agent::AcprFactory::default()),
-            idle_timeout: std::time::Duration::from_secs(900),
-            quiescence_timeout: std::time::Duration::from_secs(10),
-            send_guidelines: true,
-            lifecycle_tx: None,
-        }
-    }
-
     pub fn new_with_paths(state_path: &std::path::Path, socket_path: &std::path::Path) -> Self {
         Self {
             socket_path: socket_path.to_path_buf(),
@@ -69,13 +57,6 @@ impl Daemon {
     pub fn with_lifecycle_events(mut self, tx: LifecycleEventSender) -> Self {
         self.lifecycle_tx = Some(tx);
         self
-    }
-
-    pub fn socket_path() -> PathBuf {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".jamsession")
-            .join("daemon.sock")
     }
 
     pub async fn run(&self) -> Result<(), Error> {
