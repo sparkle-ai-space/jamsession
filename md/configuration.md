@@ -9,6 +9,12 @@ Jamsession reads configuration from `~/.jamsession/config.toml` on startup. If t
 # Log filter: supports tracing directives (e.g., "debug", "jamsession=debug,acpr=trace")
 log_filter = "info"
 
+# Idle timeout in seconds (default: 900 = 15 minutes)
+idle_timeout_secs = 900
+
+# Quiescence timeout in seconds (default: 10)
+quiescence_timeout_secs = 10
+
 # Environment variables set on the daemon process at startup.
 # These are inherited by all spawned agent processes.
 [daemon.env]
@@ -33,6 +39,8 @@ The `[daemon]` section controls daemon-level settings that apply before any sess
 | Field | Description |
 |-------|-------------|
 | `log_filter` | Tracing filter directive (default: `"info"`). Overridden by `RUST_LOG` env var if set. |
+| `idle_timeout_secs` | Seconds of inactivity before killing the agent process (default: `900`) |
+| `quiescence_timeout_secs` | Seconds of pipe silence after client disconnect before starting the idle timer (default: `10`) |
 | `env` | Key-value pairs set as environment variables on the daemon process at startup. Inherited by all spawned child processes (agents, npx, etc.). |
 
 ### Agent
@@ -100,6 +108,6 @@ The `--config-dir` flag redirects all file paths (socket, database, config, logs
 
 ## Idle timeout
 
-The agent idle timeout defaults to 15 minutes. After a client disconnects and 10 seconds of pipe silence pass (quiescence), the idle timer starts. When it expires, the agent process is killed.
+The agent idle timeout defaults to 15 minutes (`idle_timeout_secs = 900`). After a client disconnects and the quiescence period passes (`quiescence_timeout_secs = 10`), the idle timer starts. When it expires, the agent process is killed.
 
-The timeout is currently not user-configurable via config.toml (it can be overridden programmatically for integration tests).
+Both values are configurable in the `[daemon]` section of config.toml.

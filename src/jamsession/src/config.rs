@@ -19,6 +19,8 @@ pub struct Config {
 #[serde(deny_unknown_fields)]
 pub struct DaemonConfig {
     pub log_filter: Option<String>,
+    pub idle_timeout_secs: Option<u64>,
+    pub quiescence_timeout_secs: Option<u64>,
     #[serde(default)]
     pub env: HashMap<String, String>,
 }
@@ -43,6 +45,16 @@ pub struct CustomAgent {
 impl Config {
     pub fn log_filter(&self) -> Option<&str> {
         self.daemon.as_ref()?.log_filter.as_deref()
+    }
+
+    pub fn idle_timeout(&self) -> std::time::Duration {
+        let secs = self.daemon.as_ref().and_then(|d| d.idle_timeout_secs).unwrap_or(900);
+        std::time::Duration::from_secs(secs)
+    }
+
+    pub fn quiescence_timeout(&self) -> std::time::Duration {
+        let secs = self.daemon.as_ref().and_then(|d| d.quiescence_timeout_secs).unwrap_or(10);
+        std::time::Duration::from_secs(secs)
     }
 
     pub fn daemon_env(&self) -> impl Iterator<Item = (&str, &str)> {
