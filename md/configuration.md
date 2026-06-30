@@ -5,8 +5,14 @@ Jamsession reads configuration from `~/.jamsession/config.toml` on startup. If t
 ## Config file
 
 ```toml
-# Log verbosity: error, warn, info, debug, trace
-log_level = "info"
+[daemon]
+# Log filter: supports tracing directives (e.g., "debug", "jamsession=debug,acpr=trace")
+log_filter = "info"
+
+# Environment variables set on the daemon process at startup.
+# These are inherited by all spawned agent processes.
+[daemon.env]
+CLAUDE_CODE_EXECUTABLE = "/path/to/claude"
 
 # Agent configuration (pick one of the two forms below)
 [agent]
@@ -19,6 +25,15 @@ name = "claude-acp"
 # args = ["--verbose"]
 # env = { MY_KEY = "value" }
 ```
+
+### Daemon
+
+The `[daemon]` section controls daemon-level settings that apply before any sessions are created.
+
+| Field | Description |
+|-------|-------------|
+| `log_filter` | Tracing filter directive (default: `"info"`). Overridden by `RUST_LOG` env var if set. |
+| `env` | Key-value pairs set as environment variables on the daemon process at startup. Inherited by all spawned child processes (agents, npx, etc.). |
 
 ### Agent
 
@@ -35,13 +50,17 @@ If neither `name` nor `custom` is specified, the daemon defaults to `name = "cla
 
 ### Log levels
 
-| Level | What's logged |
+The `log_filter` field accepts any valid `tracing_subscriber::EnvFilter` directive:
+
+| Value | What's logged |
 |-------|--------------|
-| `error` | Failures only |
-| `warn` | Warnings + errors |
-| `info` | Lifecycle events (agent spawn/kill, client connect/disconnect) |
-| `debug` | Detailed lifecycle (timer starts, state transitions) |
-| `trace` | Every ACP message flowing through the daemon |
+| `"error"` | Failures only |
+| `"warn"` | Warnings + errors |
+| `"info"` | Lifecycle events (agent spawn/kill, client connect/disconnect) |
+| `"debug"` | Detailed lifecycle (timer starts, state transitions) |
+| `"trace"` | Every ACP message flowing through the daemon |
+
+You can also use per-crate filters like `"jamsession=debug,acpr=trace"`.
 
 ## File locations
 
@@ -77,7 +96,7 @@ The `--config-dir` flag redirects all file paths (socket, database, config, logs
 
 ## Environment variables
 
-- `RUST_LOG` -- Overrides the `log_level` setting in config.toml (standard `tracing` filter syntax).
+- `RUST_LOG` -- Overrides the `daemon.log_filter` setting in config.toml (standard `tracing` filter syntax).
 
 ## Idle timeout
 
