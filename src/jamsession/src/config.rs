@@ -11,7 +11,15 @@ use crate::error::Error;
 
 #[derive(Debug, Deserialize, Default)]
 pub struct Config {
+    pub daemon: Option<DaemonConfig>,
     pub agent: Option<AgentConfig>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonConfig {
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -32,6 +40,13 @@ pub struct CustomAgent {
 }
 
 impl Config {
+    pub fn daemon_env(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.daemon
+            .iter()
+            .flat_map(|d| d.env.iter())
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+
     pub fn load(config_dir: &Path) -> Self {
         let path = config_dir.join("config.toml");
         let contents = match std::fs::read_to_string(&path) {

@@ -69,6 +69,11 @@ async fn main() {
             init_daemon_logging(&config_dir);
 
             let config = Config::load(&config_dir);
+            for (key, value) in config.daemon_env() {
+                // SAFETY: called at startup before spawning threads.
+                unsafe { std::env::set_var(key, value) };
+                tracing::info!(key, value, "set environment variable from config");
+            }
             let factory = config.into_factory();
 
             let db_path = db_path.unwrap_or_else(|| config_dir.join("jamsession.db"));
