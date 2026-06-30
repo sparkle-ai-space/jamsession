@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+pub type Result<T> = std::result::Result<T, Error>;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("scope closed")]
@@ -14,23 +16,26 @@ pub enum Error {
     #[error("invalid working directory: {}", path.display())]
     InvalidCwd { path: PathBuf },
 
-    #[error("state file error: {0}")]
-    State(#[from] StateError),
-
     #[error("ACP protocol error: {0}")]
     Acp(#[from] agent_client_protocol::Error),
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-}
 
-#[derive(Debug, thiserror::Error)]
-pub enum StateError {
-    #[error("failed to write state file: {0}")]
-    Write(std::io::Error),
+    #[error("database error: {0}")]
+    Db(#[from] toasty::Error),
 
-    #[error("failed to parse state file: {0}")]
-    Parse(serde_json::Error),
+    #[error("sqlite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+
+    #[error("timestamp parse error: {0}")]
+    Timestamp(#[from] chrono::ParseError),
+
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    #[error("unsupported database schema version {found}; expected {expected}")]
+    SchemaVersion { found: u32, expected: u32 },
 }
 
 impl scope_tasks::SpawnError for Error {

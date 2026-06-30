@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use agent_client_protocol::schema::{
     InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
-    LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
+    LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionRequest, NewSessionResponse,
     ProtocolVersion, ResumeSessionRequest, ResumeSessionResponse, SessionId as AcpSessionId,
     SessionInfo,
 };
@@ -21,8 +21,8 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::agent::AgentFactory;
+use crate::db::{SessionRecord, Store};
 use crate::session::{LifecycleEvent, LifecycleEventSender};
-use crate::state::{DaemonState, SessionRecord};
 
 // ---------------------------------------------------------------------------
 // IDs
@@ -52,7 +52,6 @@ pub(super) enum DispatcherMessage {
         session_id: SessionId,
         client_id: ClientId,
         cwd: PathBuf,
-        replay_notifications: Vec<serde_json::Value>,
         responder: AgentReadyResponder,
     },
     AgentCapabilities {
@@ -106,7 +105,6 @@ enum LifecycleState {
 struct Session {
     agent_id: AgentId,
     client_ids: Vec<ClientId>,
-    buffer: Vec<serde_json::Value>,
     generation: u64,
     lifecycle_state: LifecycleState,
     respawn_attempted: bool,
@@ -136,6 +134,20 @@ pub(super) enum AgentReadyResponder {
     ResumeSession(Responder<ResumeSessionResponse>),
 }
 
+fn respond_agent_ready_error(responder: AgentReadyResponder, err: agent_client_protocol::Error) {
+    match responder {
+        AgentReadyResponder::NewSession(r) => {
+            let _ = r.respond_with_error(err);
+        }
+        AgentReadyResponder::LoadSession(r) => {
+            let _ = r.respond_with_error(err);
+        }
+        AgentReadyResponder::ResumeSession(r) => {
+            let _ = r.respond_with_error(err);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Dispatcher
 // ---------------------------------------------------------------------------
@@ -147,8 +159,7 @@ pub(super) struct Dispatcher<'scope> {
     sessions: HashMap<SessionId, Session>,
     client_to_session: HashMap<ClientId, SessionId>,
     agent_to_session: HashMap<AgentId, SessionId>,
-    state: DaemonState,
-    state_path: PathBuf,
+    store: Store,
     capabilities: Option<InitializeResponse>,
     factory: Arc<dyn AgentFactory>,
     idle_timeout: std::time::Duration,
@@ -161,17 +172,16 @@ pub(super) struct Dispatcher<'scope> {
 
 impl<'scope> Dispatcher<'scope> {
     #[expect(clippy::too_many_arguments)]
-    pub(super) fn new(
+    pub(super) async fn new(
         tasks: TaskSpawner<'scope, crate::error::Error>,
-        state: DaemonState,
-        state_path: PathBuf,
+        store: Store,
         factory: Arc<dyn AgentFactory>,
         idle_timeout: std::time::Duration,
         quiescence_timeout: std::time::Duration,
         send_guidelines: bool,
         event_tx: Option<LifecycleEventSender>,
         dispatcher_tx: mpsc::UnboundedSender<DispatcherMessage>,
-    ) -> Self {
+    ) -> crate::error::Result<Self> {
         let mut dispatcher = Self {
             tasks,
             clients: HashMap::new(),
@@ -179,8 +189,7 @@ impl<'scope> Dispatcher<'scope> {
             sessions: HashMap::new(),
             client_to_session: HashMap::new(),
             agent_to_session: HashMap::new(),
-            state: state.clone(),
-            state_path,
+            store,
             capabilities: None,
             factory,
             idle_timeout,
@@ -190,27 +199,27 @@ impl<'scope> Dispatcher<'scope> {
             dispatcher_tx,
             next_agent_id: 1,
         };
-        dispatcher.rehydrate_from_state(&state);
-        dispatcher
+        dispatcher.rehydrate_from_store().await?;
+        Ok(dispatcher)
     }
 
-    fn rehydrate_from_state(&mut self, state: &DaemonState) {
-        for record in &state.sessions {
+    async fn rehydrate_from_store(&mut self) -> crate::error::Result<()> {
+        for record in self.store.list_sessions(None).await? {
             if !self.sessions.contains_key(&record.session_id) {
                 self.sessions.insert(
                     record.session_id.clone(),
                     Session {
                         agent_id: 0,
                         client_ids: Vec::new(),
-                        buffer: Vec::new(),
                         generation: 0,
                         lifecycle_state: LifecycleState::AgentDead,
                         respawn_attempted: false,
-                        record: record.clone(),
+                        record,
                     },
                 );
             }
         }
+        Ok(())
     }
 
     pub(super) async fn run(&mut self, mut rx: mpsc::UnboundedReceiver<DispatcherMessage>) {
@@ -237,7 +246,6 @@ impl<'scope> Dispatcher<'scope> {
                 session_id,
                 client_id,
                 cwd,
-                replay_notifications,
                 responder,
             } => {
                 self.handle_agent_ready(
@@ -246,9 +254,9 @@ impl<'scope> Dispatcher<'scope> {
                     session_id,
                     client_id,
                     cwd,
-                    replay_notifications,
                     responder,
-                );
+                )
+                .await;
             }
             DispatcherMessage::AgentCapabilities { capabilities } => {
                 self.capabilities = Some(*capabilities);
@@ -263,7 +271,7 @@ impl<'scope> Dispatcher<'scope> {
                 self.handle_from_client(client_id, dispatch).await;
             }
             DispatcherMessage::FromAgent { agent_id, dispatch } => {
-                self.handle_from_agent(agent_id, dispatch);
+                self.handle_from_agent(agent_id, dispatch).await;
             }
             DispatcherMessage::AgentQuiescent {
                 session_id,
@@ -278,7 +286,7 @@ impl<'scope> Dispatcher<'scope> {
                 self.handle_idle_timeout(&session_id, generation);
             }
             DispatcherMessage::CwdHealthCheck => {
-                self.handle_cwd_health_check();
+                self.handle_cwd_health_check().await;
             }
         }
     }
@@ -333,15 +341,13 @@ impl<'scope> Dispatcher<'scope> {
     // Agent ready
     // -----------------------------------------------------------------------
 
-    #[expect(clippy::too_many_arguments)]
-    fn handle_agent_ready(
+    async fn handle_agent_ready(
         &mut self,
         agent_id: AgentId,
         outgoing_tx: mpsc::UnboundedSender<Dispatch>,
         session_id: SessionId,
         client_id: ClientId,
         cwd: PathBuf,
-        replay_notifications: Vec<serde_json::Value>,
         responder: AgentReadyResponder,
     ) {
         self.agents.insert(agent_id, AgentHandle { outgoing_tx });
@@ -356,25 +362,26 @@ impl<'scope> Dispatcher<'scope> {
             if !session.client_ids.contains(&client_id) {
                 session.client_ids.push(client_id);
             }
-            if !replay_notifications.is_empty() {
-                session.buffer = replay_notifications;
-            }
         } else {
+            if let Err(e) = self.store.add_session(&session_id, &cwd).await {
+                let err = agent_client_protocol::Error::internal_error().data(e.to_string());
+                respond_agent_ready_error(responder, err);
+                return;
+            }
+
+            let now = Utc::now();
             let record = SessionRecord {
                 session_id: session_id.clone(),
                 cwd,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
+                created_at: now,
+                updated_at: now,
             };
-            self.state.add_session(record.clone());
-            let _ = self.state.save(&self.state_path);
 
             self.sessions.insert(
                 session_id.clone(),
                 Session {
                     agent_id,
                     client_ids: vec![client_id],
-                    buffer: replay_notifications,
                     generation: 0,
                     lifecycle_state: LifecycleState::Active,
                     respawn_attempted: false,
@@ -393,17 +400,11 @@ impl<'scope> Dispatcher<'scope> {
                 }
             }
             AgentReadyResponder::LoadSession(r) => {
-                if let Some(session) = self.sessions.get(&session_id)
-                    && let Some(client) = self.clients.get(&client_id)
-                {
-                    for msg in &session.buffer {
-                        if let Ok(untyped) = serde_json::from_value::<
-                            agent_client_protocol::UntypedMessage,
-                        >(msg.clone())
-                        {
-                            let _ = client.outgoing_tx.send(Dispatch::Notification(untyped));
-                        }
-                    }
+                if let Err(e) = self.replay_session_to_client(&session_id, client_id).await {
+                    let _ = r.respond_with_error(
+                        agent_client_protocol::Error::internal_error().data(e.to_string()),
+                    );
+                    return;
                 }
                 let _ = r.respond(LoadSessionResponse::new());
                 self.emit(LifecycleEvent::SessionLoaded { session_id });
@@ -435,7 +436,6 @@ impl<'scope> Dispatcher<'scope> {
         }
 
         session.lifecycle_state = LifecycleState::AgentDead;
-        session.buffer.clear();
         tracing::warn!(session_id, "agent disconnected unexpectedly");
     }
     // ANCHOR_END: handle-agent-exited
@@ -454,7 +454,7 @@ impl<'scope> Dispatcher<'scope> {
             })
             .await
             .if_request(async |req: ListSessionsRequest, responder| {
-                self.handle_list_sessions(req, responder);
+                self.handle_list_sessions(req, responder).await;
                 Ok(())
             })
             .await
@@ -464,7 +464,7 @@ impl<'scope> Dispatcher<'scope> {
             })
             .await
             .if_request(async |req: LoadSessionRequest, responder| {
-                self.handle_session_load(client_id, req, responder);
+                self.handle_session_load(client_id, req, responder).await;
                 Ok(())
             })
             .await
@@ -570,18 +570,23 @@ impl<'scope> Dispatcher<'scope> {
     // -----------------------------------------------------------------------
 
     // ANCHOR: handle-session-list
-    fn handle_list_sessions(
+    async fn handle_list_sessions(
         &self,
         req: ListSessionsRequest,
         responder: Responder<ListSessionsResponse>,
     ) {
-        let sessions = self.state.list_sessions_by_cwd(req.cwd.as_deref());
+        let sessions = match self.store.list_sessions(req.cwd.as_deref()).await {
+            Ok(sessions) => sessions,
+            Err(e) => {
+                let _ = responder.respond_with_error(
+                    agent_client_protocol::Error::internal_error().data(e.to_string()),
+                );
+                return;
+            }
+        };
         let session_infos: Vec<SessionInfo> = sessions
             .into_iter()
-            .map(|s| {
-                SessionInfo::new(s.session_id.clone(), s.cwd.clone())
-                    .updated_at(s.updated_at.to_rfc3339())
-            })
+            .map(|s| SessionInfo::new(s.session_id, s.cwd).updated_at(s.updated_at.to_rfc3339()))
             .collect();
         let _ = responder.respond(ListSessionsResponse::new(session_infos));
     }
@@ -647,7 +652,7 @@ impl<'scope> Dispatcher<'scope> {
     // -----------------------------------------------------------------------
 
     // ANCHOR: handle-session-load
-    fn handle_session_load(
+    async fn handle_session_load(
         &mut self,
         client_id: ClientId,
         req: LoadSessionRequest,
@@ -667,52 +672,21 @@ impl<'scope> Dispatcher<'scope> {
         let cwd = session.record.cwd.clone();
 
         if is_dead {
-            let factory = self.factory.clone();
-            let dispatcher_tx = self.dispatcher_tx.clone();
-            let agent_id = self.generate_agent_id();
-
-            let transport = match factory.create_transport(&session_id, &cwd, &req.mcp_servers) {
-                Ok(t) => t,
-                Err(e) => {
-                    let _ = responder.respond_with_error(
-                        agent_client_protocol::Error::internal_error().data(e.to_string()),
-                    );
-                    return;
-                }
-            };
-
-            let _ = self.tasks.spawn(async move {
-                agent_pipe(
-                    transport,
-                    dispatcher_tx,
-                    AgentSpawnRequest {
-                        client_id,
-                        agent_id,
-                        request: SessionRequest::Load {
-                            session_id,
-                            cwd,
-                            mcp_servers: req.mcp_servers,
-                        },
-                        send_guidelines: false,
-                    },
-                    AgentReadyResponder::LoadSession(responder),
-                )
-                .await;
-                Ok(())
-            });
+            self.spawn_resumed_agent(
+                client_id,
+                session_id,
+                cwd,
+                req.mcp_servers,
+                AgentReadyResponder::LoadSession(responder),
+            );
         } else {
-            // Agent alive: replay buffer to new client, respond immediately
-            if let Some(client) = self.clients.get(&client_id) {
-                for msg in &session.buffer {
-                    if let Ok(untyped) =
-                        serde_json::from_value::<agent_client_protocol::UntypedMessage>(msg.clone())
-                    {
-                        let _ = client.outgoing_tx.send(Dispatch::Notification(untyped));
-                    }
-                }
+            if let Err(e) = self.replay_session_to_client(&session_id, client_id).await {
+                let _ = responder.respond_with_error(
+                    agent_client_protocol::Error::internal_error().data(e.to_string()),
+                );
+                return;
             }
 
-            // Wire client to this session
             self.client_to_session.insert(client_id, session_id.clone());
             if let Some(session) = self.sessions.get_mut(&session_id) {
                 if !session.client_ids.contains(&client_id) {
@@ -722,6 +696,7 @@ impl<'scope> Dispatcher<'scope> {
             }
 
             let _ = responder.respond(LoadSessionResponse::new());
+            self.emit(LifecycleEvent::SessionLoaded { session_id });
         }
     }
     // ANCHOR_END: handle-session-load
@@ -750,39 +725,13 @@ impl<'scope> Dispatcher<'scope> {
         let cwd = session.record.cwd.clone();
 
         if is_dead {
-            let factory = self.factory.clone();
-            let dispatcher_tx = self.dispatcher_tx.clone();
-            let agent_id = self.generate_agent_id();
-
-            let transport = match factory.create_transport(&session_id, &cwd, &req.mcp_servers) {
-                Ok(t) => t,
-                Err(e) => {
-                    let _ = responder.respond_with_error(
-                        agent_client_protocol::Error::internal_error().data(e.to_string()),
-                    );
-                    return;
-                }
-            };
-
-            let _ = self.tasks.spawn(async move {
-                agent_pipe(
-                    transport,
-                    dispatcher_tx,
-                    AgentSpawnRequest {
-                        client_id,
-                        agent_id,
-                        request: SessionRequest::Load {
-                            session_id,
-                            cwd,
-                            mcp_servers: req.mcp_servers,
-                        },
-                        send_guidelines: false,
-                    },
-                    AgentReadyResponder::ResumeSession(responder),
-                )
-                .await;
-                Ok(())
-            });
+            self.spawn_resumed_agent(
+                client_id,
+                session_id,
+                cwd,
+                req.mcp_servers,
+                AgentReadyResponder::ResumeSession(responder),
+            );
         } else {
             // Agent alive: just wire client to session (no replay for resume)
             self.client_to_session.insert(client_id, session_id.clone());
@@ -797,12 +746,56 @@ impl<'scope> Dispatcher<'scope> {
         }
     }
 
+    fn spawn_resumed_agent(
+        &mut self,
+        client_id: ClientId,
+        session_id: SessionId,
+        cwd: PathBuf,
+        mcp_servers: Vec<McpServer>,
+        responder: AgentReadyResponder,
+    ) {
+        let factory = self.factory.clone();
+        let dispatcher_tx = self.dispatcher_tx.clone();
+        let agent_id = self.generate_agent_id();
+
+        let transport = match factory.create_transport(&session_id, &cwd, &mcp_servers) {
+            Ok(t) => t,
+            Err(e) => {
+                respond_agent_ready_error(
+                    responder,
+                    agent_client_protocol::Error::internal_error().data(e.to_string()),
+                );
+                return;
+            }
+        };
+
+        let _ = self.tasks.spawn(async move {
+            agent_pipe(
+                transport,
+                dispatcher_tx,
+                AgentSpawnRequest {
+                    client_id,
+                    agent_id,
+                    request: SessionRequest::Resume {
+                        session_id,
+                        cwd,
+                        mcp_servers,
+                    },
+                    send_guidelines: false,
+                },
+                responder,
+            )
+            .await;
+            Ok(())
+        });
+    }
+
     // -----------------------------------------------------------------------
     // FromAgent routing
     // -----------------------------------------------------------------------
 
     // ANCHOR: route-messages
-    fn handle_from_agent(&mut self, agent_id: AgentId, dispatch: Dispatch) {
+    async fn handle_from_agent(&mut self, agent_id: AgentId, dispatch: Dispatch) {
         let Some(session_id) = self.agent_to_session.get(&agent_id).cloned() else {
             tracing::warn!(agent_id, "dispatch from unknown agent");
             return;
@@ -813,8 +806,9 @@ impl<'scope> Dispatcher<'scope> {
 
         if let Dispatch::Notification(ref notif) = dispatch
             && let Ok(value) = serde_json::to_value(notif)
+            && let Err(e) = self.store.append_message(&session_id, &value).await
         {
-            session.buffer.push(value);
+            tracing::error!(session_id, error = %e, "failed to persist agent notification");
         }
 
         session.generation += 1;
@@ -872,7 +866,6 @@ impl<'scope> Dispatcher<'scope> {
         self.agent_to_session.remove(&agent_id);
 
         session.lifecycle_state = LifecycleState::AgentDead;
-        session.buffer.clear();
 
         tracing::info!(session_id, "agent killed due to idle timeout");
         self.emit(LifecycleEvent::AgentKilledIdle {
@@ -885,7 +878,7 @@ impl<'scope> Dispatcher<'scope> {
     // -----------------------------------------------------------------------
 
     // ANCHOR: cwd-health-check
-    fn handle_cwd_health_check(&mut self) {
+    async fn handle_cwd_health_check(&mut self) {
         let to_remove: Vec<SessionId> = self
             .sessions
             .iter()
@@ -901,12 +894,10 @@ impl<'scope> Dispatcher<'scope> {
                     self.client_to_session.remove(&cid);
                 }
             }
-            self.state.remove_session(sid);
+            if let Err(e) = self.store.remove_session(sid).await {
+                tracing::error!(session_id = sid.as_str(), error = %e, "failed to remove session");
+            }
             tracing::info!(session_id = sid.as_str(), "session removed: cwd deleted");
-        }
-
-        if !to_remove.is_empty() {
-            let _ = self.state.save(&self.state_path);
         }
     }
     // ANCHOR_END: cwd-health-check
@@ -919,6 +910,26 @@ impl<'scope> Dispatcher<'scope> {
         if let Some(tx) = &self.event_tx {
             let _ = tx.send(event);
         }
+    }
+
+    async fn replay_session_to_client(
+        &self,
+        session_id: &str,
+        client_id: ClientId,
+    ) -> crate::error::Result<()> {
+        let Some(client) = self.clients.get(&client_id) else {
+            return Ok(());
+        };
+
+        for msg in self.store.messages_for_session(session_id).await? {
+            if let Ok(untyped) =
+                serde_json::from_value::<agent_client_protocol::UntypedMessage>(msg)
+            {
+                let _ = client.outgoing_tx.send(Dispatch::Notification(untyped));
+            }
+        }
+
+        Ok(())
     }
 
     fn generate_agent_id(&mut self) -> AgentId {
@@ -1001,7 +1012,7 @@ enum SessionRequest {
         cwd: PathBuf,
         mcp_servers: Vec<agent_client_protocol::schema::McpServer>,
     },
-    Load {
+    Resume {
         session_id: String,
         cwd: PathBuf,
         mcp_servers: Vec<agent_client_protocol::schema::McpServer>,
@@ -1084,28 +1095,16 @@ async fn agent_pipe(
                             session_id,
                             client_id: spawn_request.client_id,
                             cwd: cwd.clone(),
-                            replay_notifications: Vec::new(),
                             responder,
                         });
                     }
-                    SessionRequest::Load {
+                    SessionRequest::Resume {
                         ref session_id,
                         ref cwd,
                         ref mcp_servers,
                     } => {
-                        let replay_buffer: Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
-                            Arc::new(std::sync::Mutex::new(Vec::new()));
-                        cx.add_dynamic_handler(ReplayCapture {
-                            buffer: replay_buffer.clone(),
-                        })
-                        .map_err(|e| {
-                            agent_client_protocol::Error::internal_error()
-                                .data(format!("replay capture: {e}"))
-                        })?
-                        .run_indefinitely();
-
                         cx.send_request(
-                            LoadSessionRequest::new(AcpSessionId::new(session_id.as_str()), cwd)
+                            ResumeSessionRequest::new(AcpSessionId::new(session_id.as_str()), cwd)
                                 .mcp_servers(mcp_servers.clone()),
                         )
                         .block_task()
@@ -1121,7 +1120,6 @@ async fn agent_pipe(
                         })?
                         .run_indefinitely();
 
-                        let replay = replay_buffer.lock().unwrap().clone();
                         let responder = responder_slot.lock().unwrap().take().unwrap();
                         let _ = dispatcher_tx.send(DispatcherMessage::AgentReady {
                             agent_id,
@@ -1129,7 +1127,6 @@ async fn agent_pipe(
                             session_id: session_id.clone(),
                             client_id: spawn_request.client_id,
                             cwd: cwd.clone(),
-                            replay_notifications: replay,
                             responder,
                         });
                     }
@@ -1152,17 +1149,7 @@ async fn agent_pipe(
         tracing::error!(agent_id, error = %e, "agent pipe error");
         if let Some(responder) = responder_slot.lock().unwrap().take() {
             let err = agent_client_protocol::Error::internal_error().data(e.to_string());
-            match responder {
-                AgentReadyResponder::NewSession(r) => {
-                    let _ = r.respond_with_error(err);
-                }
-                AgentReadyResponder::LoadSession(r) => {
-                    let _ = r.respond_with_error(err);
-                }
-                AgentReadyResponder::ResumeSession(r) => {
-                    let _ = r.respond_with_error(err);
-                }
-            }
+            respond_agent_ready_error(responder, err);
         }
     }
 
@@ -1193,35 +1180,5 @@ impl HandleDispatchFrom<agent_client_protocol::Agent> for AgentDispatchForwarder
 
     fn describe_chain(&self) -> impl std::fmt::Debug {
         "AgentDispatchForwarder"
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ReplayCapture
-// ---------------------------------------------------------------------------
-
-struct ReplayCapture {
-    buffer: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
-}
-
-impl HandleDispatchFrom<agent_client_protocol::Agent> for ReplayCapture {
-    async fn handle_dispatch_from(
-        &mut self,
-        message: Dispatch,
-        _cx: agent_client_protocol::ConnectionTo<agent_client_protocol::Agent>,
-    ) -> agent_client_protocol::schema::Result<Handled<Dispatch>> {
-        if let Dispatch::Notification(ref notif) = message
-            && let Ok(value) = serde_json::to_value(notif)
-        {
-            self.buffer.lock().unwrap().push(value);
-        }
-        Ok(Handled::No {
-            message,
-            retry: false,
-        })
-    }
-
-    fn describe_chain(&self) -> impl std::fmt::Debug {
-        "ReplayCapture"
     }
 }

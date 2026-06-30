@@ -2,35 +2,54 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::net::UnixListener;
+use tokio_util::sync::CancellationToken;
 
 use scope_tasks::scope;
 
 use crate::agent::AgentFactory;
+use crate::db::Store;
 use crate::dispatcher::{self, Dispatcher, DispatcherMessage};
 use crate::error::Error;
 use crate::session::{LifecycleEvent, LifecycleEventSender};
-use crate::state::DaemonState;
 
 pub struct Daemon {
     socket_path: PathBuf,
-    state_path: PathBuf,
+    db_path: Option<PathBuf>,
+    store: Option<Store>,
     factory: Arc<dyn AgentFactory>,
     idle_timeout: std::time::Duration,
     quiescence_timeout: std::time::Duration,
     send_guidelines: bool,
     lifecycle_tx: Option<LifecycleEventSender>,
+    shutdown_token: Option<CancellationToken>,
 }
 
 impl Daemon {
-    pub fn new_with_paths(state_path: &std::path::Path, socket_path: &std::path::Path) -> Self {
+    pub fn new_with_paths(db_path: &std::path::Path, socket_path: &std::path::Path) -> Self {
         Self {
             socket_path: socket_path.to_path_buf(),
-            state_path: state_path.to_path_buf(),
+            db_path: Some(db_path.to_path_buf()),
+            store: None,
             factory: Arc::new(crate::agent::AcprFactory::default()),
             idle_timeout: std::time::Duration::from_secs(900),
             quiescence_timeout: std::time::Duration::from_secs(10),
             send_guidelines: true,
             lifecycle_tx: None,
+            shutdown_token: None,
+        }
+    }
+
+    pub fn new_with_store(store: Store, socket_path: &std::path::Path) -> Self {
+        Self {
+            socket_path: socket_path.to_path_buf(),
+            db_path: None,
+            store: Some(store),
+            factory: Arc::new(crate::agent::AcprFactory::default()),
+            idle_timeout: std::time::Duration::from_secs(900),
+            quiescence_timeout: std::time::Duration::from_secs(10),
+            send_guidelines: true,
+            lifecycle_tx: None,
+            shutdown_token: None,
         }
     }
 
@@ -59,8 +78,23 @@ impl Daemon {
         self
     }
 
+    pub fn with_shutdown_token(mut self, token: CancellationToken) -> Self {
+        self.shutdown_token = Some(token);
+        self
+    }
+
     pub async fn run(&self) -> Result<(), Error> {
-        let state = DaemonState::load(&self.state_path);
+        let store = match &self.store {
+            Some(store) => store.clone(),
+            None => {
+                Store::open(
+                    self.db_path
+                        .as_deref()
+                        .expect("daemon requires either a db path or store"),
+                )
+                .await?
+            }
+        };
 
         let (dispatcher_tx, dispatcher_rx) =
             tokio::sync::mpsc::unbounded_channel::<DispatcherMessage>();
@@ -68,9 +102,18 @@ impl Daemon {
         // ANCHOR: cwd-health-check-timer
         {
             let tx = dispatcher_tx.clone();
+            let shutdown = self.shutdown_token.clone();
             tokio::spawn(async move {
                 loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    match &shutdown {
+                        Some(token) => {
+                            tokio::select! {
+                                () = token.cancelled() => break,
+                                () = tokio::time::sleep(std::time::Duration::from_secs(60)) => {}
+                            }
+                        }
+                        None => tokio::time::sleep(std::time::Duration::from_secs(60)).await,
+                    }
                     let _ = tx.send(DispatcherMessage::CwdHealthCheck);
                 }
             });
@@ -100,10 +143,21 @@ impl Daemon {
         // ANCHOR: accept-loop
         {
             let accept_tx = dispatcher_tx.clone();
+            let shutdown = self.shutdown_token.clone();
             tokio::spawn(async move {
                 let mut next_client_id = 1u64;
                 loop {
-                    match listener.accept().await {
+                    let accepted = match &shutdown {
+                        Some(token) => {
+                            tokio::select! {
+                                () = token.cancelled() => break,
+                                accepted = listener.accept() => accepted,
+                            }
+                        }
+                        None => listener.accept().await,
+                    };
+
+                    match accepted {
                         Ok((stream, _)) => {
                             let client_id = next_client_id;
                             next_client_id += 1;
@@ -125,17 +179,25 @@ impl Daemon {
             async |tasks| {
                 let mut dispatcher = Dispatcher::new(
                     tasks,
-                    state,
-                    self.state_path.clone(),
+                    store,
                     self.factory.clone(),
                     self.idle_timeout,
                     self.quiescence_timeout,
                     self.send_guidelines,
                     self.lifecycle_tx.clone(),
                     dispatcher_tx,
-                );
+                )
+                .await?;
 
-                dispatcher.run(dispatcher_rx).await;
+                match &self.shutdown_token {
+                    Some(token) => {
+                        tokio::select! {
+                            () = token.cancelled() => {}
+                            () = dispatcher.run(dispatcher_rx) => {}
+                        }
+                    }
+                    None => dispatcher.run(dispatcher_rx).await,
+                }
                 Ok(())
             },
             scope_tasks::scope_hack!(),

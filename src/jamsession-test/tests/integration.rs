@@ -1,6 +1,46 @@
+use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
-use jamsession_test::{LifecycleEvent, TestDaemon, TestDaemonConfig, expect_test::expect};
+use futures::FutureExt;
+use jamsession_test::{
+    LifecycleEvent, RhaiAgentFactory, TestDaemon, TestDaemonConfig, TestUnixSocketTransport,
+    expect_test::expect,
+};
+
+async fn start_file_backed_daemon(
+    config: TestDaemonConfig,
+    db_path: &Path,
+    socket_path: &Path,
+) -> tokio::task::JoinHandle<Result<(), jamsession::error::Error>> {
+    let factory: Arc<dyn jamsession::agent::AgentFactory> =
+        Arc::new(RhaiAgentFactory::new(&config));
+    let db_path = db_path.to_path_buf();
+    let socket_path = socket_path.to_path_buf();
+    let poll_socket_path = socket_path.clone();
+    let idle_timeout = config.idle_timeout;
+
+    let handle = tokio::spawn(async move {
+        let daemon = jamsession::daemon::Daemon::new_with_paths(&db_path, &socket_path)
+            .with_factory(factory)
+            .with_idle_timeout(idle_timeout)
+            .with_quiescence_timeout(Duration::from_millis(10))
+            .with_send_guidelines(false);
+        daemon.run().await
+    });
+
+    for _ in 0..50 {
+        if poll_socket_path.exists() {
+            return handle;
+        }
+        if handle.is_finished() {
+            let result = handle.now_or_never().expect("finished handle");
+            panic!("daemon exited before creating socket: {result:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("daemon did not start in time");
+}
 
 #[tokio::test]
 async fn smoke_list_sessions_empty() {
@@ -203,23 +243,21 @@ async fn load_live_session_replays_buffer() {
         .execute_client(&format!(
             r#"
         let s = load_session("{session_id}");
-        s.prompt("world")
+        let u = s.updates();
+        let r = s.prompt("world");
+        u[0].type + ":" + u[0].text + "|" + r
     "#
         ))
         .await;
 
-    assert_eq!(result, "second: world");
+    assert_eq!(result, "agent_message_chunk:first: hello|second: world");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn load_dead_session_respawns_agent() {
+async fn load_dead_session_respawns_agent_and_replays_history() {
     let daemon = TestDaemon::start(TestDaemonConfig {
         idle_timeout: Duration::from_millis(50),
         agent_script: r#"
-            if is_load() {
-                user("original prompt");
-                say("original response");
-            }
             loop {
                 let prompt = receive_prompt();
                 if prompt != "" {
@@ -249,12 +287,80 @@ async fn load_dead_session_respawns_agent() {
         .execute_client(&format!(
             r#"
         let s = load_session("{session_id}");
-        s.prompt("follow up")
+        let u = s.updates();
+        let r = s.prompt("follow up");
+        u[0].type + ":" + u[0].text + "|" + r
     "#
         ))
         .await;
 
-    assert_eq!(result, "new: follow up");
+    assert_eq!(
+        result,
+        "agent_message_chunk:new: original prompt|new: follow up"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn load_session_replays_history_after_daemon_restart() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("jamsession.db");
+    let socket_path = dir.path().join("daemon.sock");
+    let config = || TestDaemonConfig {
+        agent_script: r#"
+            loop {
+                let prompt = receive_prompt();
+                if prompt != "" {
+                    say("reply: " + prompt);
+                    break;
+                }
+            }
+        "#
+        .into(),
+        ..Default::default()
+    };
+
+    let first = start_file_backed_daemon(config(), &db_path, &socket_path).await;
+    let session_id = rhaicp::client::RhaiClient::new()
+        .cwd("/tmp")
+        .execute(
+            TestUnixSocketTransport::new(&socket_path),
+            r#"
+                let s = start_session();
+                s.prompt("before restart");
+                s.session_id()
+            "#,
+        )
+        .await
+        .expect("first client failed");
+
+    first.abort();
+    let _ = first.await;
+    let _ = tokio::fs::remove_file(&socket_path).await;
+
+    let second = start_file_backed_daemon(config(), &db_path, &socket_path).await;
+    let result = rhaicp::client::RhaiClient::new()
+        .cwd("/tmp")
+        .execute(
+            TestUnixSocketTransport::new(&socket_path),
+            &format!(
+                r#"
+                let sessions = list_sessions();
+                let s = load_session("{session_id}");
+                let u = s.updates();
+                let r = s.prompt("after restart");
+                sessions.len() + "|" + u[0].type + ":" + u[0].text + "|" + r
+            "#
+            ),
+        )
+        .await
+        .expect("second client failed");
+
+    assert_eq!(
+        result,
+        "1|agent_message_chunk:reply: before restart|reply: after restart"
+    );
+
+    second.abort();
 }
 
 #[tokio::test(flavor = "multi_thread")]

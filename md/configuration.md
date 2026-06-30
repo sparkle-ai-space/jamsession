@@ -48,7 +48,7 @@ If neither `name` nor `custom` is specified, the daemon defaults to `name = "cla
 | Path | Purpose |
 |------|---------|
 | `~/.jamsession/daemon.sock` | Unix domain socket (created at startup, `0600` permissions) |
-| `~/.jamsession/state.json` | Persistent session registry |
+| `~/.jamsession/jamsession.db` | SQLite database for sessions and conversation history |
 | `~/.jamsession/config.toml` | Daemon configuration |
 | `~/.jamsession/daemon.log` | Main daemon log (daily rotation) |
 | `~/.jamsession/sessions/<id>/session.log` | Per-session log |
@@ -69,11 +69,11 @@ Commands:
 jamsession daemon [OPTIONS]
 
 Options:
-    --state-path <PATH>    Override the state file location
+    --db-path <PATH>       Override the SQLite database location
     -h, --help             Print help
 ```
 
-The `--config-dir` flag redirects all file paths (socket, state, config, logs) to the given directory. Useful for running isolated test instances.
+The `--config-dir` flag redirects all file paths (socket, database, config, logs) to the given directory. Useful for running isolated test instances.
 
 ## Environment variables
 

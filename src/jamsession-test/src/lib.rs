@@ -10,11 +10,13 @@ use jamsession::agent::AgentFactory;
 use jamsession::error::Error;
 use rhaicp::RhaiAgent;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use transport::UnixSocketTransport;
 
 pub use expect_test;
 pub use jamsession::LifecycleEvent;
 pub use rhaicp::PriorSession;
+pub use transport::UnixSocketTransport as TestUnixSocketTransport;
 
 /// Test implementation of `AgentFactory` that creates in-process RhaiAgent instances.
 pub struct RhaiAgentFactory {
@@ -153,8 +155,9 @@ impl Default for TestDaemonConfig {
 pub struct TestDaemon {
     _temp_dir: tempfile::TempDir,
     socket_path: PathBuf,
-    _daemon_handle: tokio::task::JoinHandle<Result<(), jamsession::error::Error>>,
-    _drain_handle: tokio::task::JoinHandle<()>,
+    daemon_handle: Option<tokio::task::JoinHandle<Result<(), jamsession::error::Error>>>,
+    drain_handle: tokio::task::JoinHandle<()>,
+    shutdown_token: CancellationToken,
     events: Arc<Mutex<Vec<LifecycleEvent>>>,
     notify: Arc<tokio::sync::Notify>,
 }
@@ -165,7 +168,9 @@ impl TestDaemon {
     pub async fn start(config: TestDaemonConfig) -> Self {
         let temp_dir = tempfile::TempDir::new().expect("failed to create temp dir");
         let socket_path = temp_dir.path().join("daemon.sock");
-        let state_path = temp_dir.path().join("state.json");
+        let store = jamsession::db::Store::in_memory()
+            .await
+            .expect("failed to create in-memory database");
 
         let factory: Arc<dyn AgentFactory> = {
             let base: Arc<dyn AgentFactory> = Arc::new(RhaiAgentFactory::new(&config));
@@ -176,18 +181,20 @@ impl TestDaemon {
             }
         };
         let idle_timeout = config.idle_timeout;
+        let shutdown_token = CancellationToken::new();
 
         let (lifecycle_tx, lifecycle_rx) = mpsc::unbounded_channel();
 
         let socket_path_clone = socket_path.clone();
+        let daemon_shutdown = shutdown_token.clone();
         let daemon_handle = tokio::spawn(async move {
-            let daemon =
-                jamsession::daemon::Daemon::new_with_paths(&state_path, &socket_path_clone)
-                    .with_factory(factory)
-                    .with_idle_timeout(idle_timeout)
-                    .with_quiescence_timeout(Duration::from_millis(10))
-                    .with_send_guidelines(false)
-                    .with_lifecycle_events(lifecycle_tx);
+            let daemon = jamsession::daemon::Daemon::new_with_store(store, &socket_path_clone)
+                .with_factory(factory)
+                .with_idle_timeout(idle_timeout)
+                .with_quiescence_timeout(Duration::from_millis(10))
+                .with_send_guidelines(false)
+                .with_lifecycle_events(lifecycle_tx)
+                .with_shutdown_token(daemon_shutdown);
             daemon.run().await
         });
 
@@ -205,8 +212,9 @@ impl TestDaemon {
         let this = Self {
             _temp_dir: temp_dir,
             socket_path,
-            _daemon_handle: daemon_handle,
-            _drain_handle: drain_handle,
+            daemon_handle: Some(daemon_handle),
+            drain_handle,
+            shutdown_token,
             events,
             notify,
         };
@@ -335,11 +343,27 @@ impl TestDaemon {
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }
+
+    pub async fn shutdown(&mut self) {
+        self.shutdown_token.cancel();
+        if let Some(mut handle) = self.daemon_handle.take()
+            && tokio::time::timeout(Duration::from_secs(2), &mut handle)
+                .await
+                .is_err()
+        {
+            handle.abort();
+        }
+        self.drain_handle.abort();
+        let _ = tokio::fs::remove_file(&self.socket_path).await;
+    }
 }
 
 impl Drop for TestDaemon {
     fn drop(&mut self) {
-        self._daemon_handle.abort();
-        self._drain_handle.abort();
+        self.shutdown_token.cancel();
+        if let Some(handle) = &self.daemon_handle {
+            handle.abort();
+        }
+        self.drain_handle.abort();
     }
 }
