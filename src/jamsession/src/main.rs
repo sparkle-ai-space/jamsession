@@ -30,7 +30,7 @@ enum Command {
     Kill,
 }
 
-fn init_daemon_logging(config_dir: &Path) {
+fn init_daemon_logging(config_dir: &Path, log_filter: Option<&str>) {
     use jamsession::logging::SessionFileLayer;
     use tracing_subscriber::EnvFilter;
     use tracing_subscriber::layer::SubscriberExt;
@@ -44,7 +44,9 @@ fn init_daemon_logging(config_dir: &Path) {
     // Leak the guard so it lives for the process lifetime
     std::mem::forget(_guard);
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(log_filter.unwrap_or("info"))
+    });
 
     tracing_subscriber::registry()
         .with(filter)
@@ -66,14 +68,15 @@ async fn main() {
 
     match cli.command.unwrap_or(Command::Daemon { db_path: None }) {
         Command::Daemon { db_path } => {
-            init_daemon_logging(&config_dir);
-
             let config = Config::load(&config_dir);
             for (key, value) in config.daemon_env() {
                 // SAFETY: called at startup before spawning threads.
                 unsafe { std::env::set_var(key, value) };
-                tracing::info!(key, value, "set environment variable from config");
             }
+            init_daemon_logging(&config_dir, config.log_filter());
+            let idle_timeout = config.idle_timeout();
+            let quiescence_timeout = config.quiescence_timeout();
+            let default_model = config.default_model().map(String::from);
             let factory = config.into_factory();
 
             let db_path = db_path.unwrap_or_else(|| config_dir.join("jamsession.db"));
@@ -89,7 +92,11 @@ async fn main() {
                 }
             };
 
-            let daemon = Daemon::new_with_store(store, &socket_path).with_factory(factory);
+            let daemon = Daemon::new_with_store(store, &socket_path)
+                .with_factory(factory)
+                .with_idle_timeout(idle_timeout)
+                .with_quiescence_timeout(quiescence_timeout)
+                .with_default_model(default_model);
 
             let shutdown = tokio::signal::ctrl_c();
             tokio::select! {

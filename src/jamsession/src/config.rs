@@ -18,6 +18,7 @@ pub struct Config {
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DaemonConfig {
+    pub log_filter: Option<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
 }
@@ -40,6 +41,10 @@ pub struct CustomAgent {
 }
 
 impl Config {
+    pub fn log_filter(&self) -> Option<&str> {
+        self.daemon.as_ref()?.log_filter.as_deref()
+    }
+
     pub fn daemon_env(&self) -> impl Iterator<Item = (&str, &str)> {
         self.daemon
             .iter()
