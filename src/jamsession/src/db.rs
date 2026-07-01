@@ -296,6 +296,13 @@ async fn configure_sqlite_file(db: &toasty::Db) -> crate::error::Result<()> {
 
 async fn table_exists(db: &toasty::Db, table_name: &str) -> crate::error::Result<bool> {
     let mut db = db.clone();
+    table_exists_on(&mut db, table_name).await
+}
+
+async fn table_exists_on(
+    executor: &mut dyn toasty::Executor,
+    table_name: &str,
+) -> crate::error::Result<bool> {
     let rows = toasty::sql::query(
         "SELECT EXISTS (
             SELECT 1 FROM sqlite_master
@@ -304,7 +311,7 @@ async fn table_exists(db: &toasty::Db, table_name: &str) -> crate::error::Result
     )
     .bind(table_name)
     .column_types([toasty::stmt::Type::Bool])
-    .exec(&mut db)
+    .exec(executor)
     .await?;
 
     Ok(matches!(
@@ -315,33 +322,49 @@ async fn table_exists(db: &toasty::Db, table_name: &str) -> crate::error::Result
 }
 
 async fn create_trace_schema(db: &toasty::Db) -> crate::error::Result<()> {
-    let mut db = db.clone();
-    toasty::sql::statement(
-        "
-        CREATE TABLE IF NOT EXISTS traces (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts TEXT NOT NULL,
-            session_id TEXT,
-            dir TEXT NOT NULL,
-            role TEXT,
-            kind TEXT NOT NULL,
-            method TEXT,
-            request_id TEXT,
-            payload TEXT NOT NULL
-        );
-        ",
-    )
-    .exec(&mut db)
-    .await?;
-    toasty::sql::statement(
-        "CREATE INDEX IF NOT EXISTS idx_traces_session_id ON traces(session_id)",
-    )
-    .exec(&mut db)
-    .await?;
-    toasty::sql::statement("CREATE INDEX IF NOT EXISTS idx_traces_ts ON traces(ts)")
-        .exec(&mut db)
+    let next_schema = db.schema().db.clone();
+    let mut previous_schema = next_schema.clone();
+    previous_schema
+        .tables
+        .retain(|table| table.name != "traces");
+
+    let Some(generated) = toasty::migration::generate(
+        db.driver(),
+        &previous_schema,
+        &next_schema,
+        &toasty::schema::diff::RenameHints::new(),
+    ) else {
+        return Ok(());
+    };
+
+    let mut conn = db.connection().await?;
+    toasty::sql::statement("BEGIN IMMEDIATE")
+        .exec(&mut conn)
         .await?;
-    Ok(())
+
+    let result = async {
+        if table_exists_on(&mut conn, "traces").await? {
+            return Ok(());
+        }
+
+        for statement in generated.migration.statements() {
+            toasty::sql::statement(statement).exec(&mut conn).await?;
+        }
+
+        Ok(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => {
+            toasty::sql::statement("COMMIT").exec(&mut conn).await?;
+            Ok(())
+        }
+        Err(err) => {
+            let _ = toasty::sql::statement("ROLLBACK").exec(&mut conn).await;
+            Err(err)
+        }
+    }
 }
 
 async fn remove_traces_for_session(db: &toasty::Db, session_id: &str) -> crate::error::Result<()> {
@@ -514,6 +537,37 @@ mod tests {
         assert_eq!(traces[0].kind, TraceKind::Request);
         assert_eq!(traces[0].method.as_deref(), Some("session/prompt"));
         assert_eq!(traces[0].payload, serde_json::json!({"prompt": "hello"}));
+    }
+
+    #[tokio::test]
+    async fn open_adds_trace_schema_to_existing_database() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("jamsession.db");
+        let old_db = toasty::Db::builder()
+            .models(toasty::models!(Session, Message))
+            .build(toasty_driver_sqlite::Sqlite::open(&db_path))
+            .await
+            .unwrap();
+        old_db.push_schema().await.unwrap();
+        drop(old_db);
+
+        let store = Store::open(&db_path).await.unwrap();
+        store
+            .record_trace(NewTrace {
+                session_id: Some("sess-1".to_string()),
+                dir: TraceDirection::Internal,
+                role: Some("daemon".to_string()),
+                kind: TraceKind::Event,
+                method: Some("session_created".to_string()),
+                request_id: None,
+                payload: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+
+        let traces = store.traces(TraceQuery::default()).await.unwrap();
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0].method.as_deref(), Some("session_created"));
     }
 
     #[tokio::test]
