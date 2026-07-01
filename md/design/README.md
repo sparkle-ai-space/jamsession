@@ -12,6 +12,7 @@ Start with this page for the high-level architecture, then walk through the flow
 - **[Idle spin-down](./flow-idle-spindown.md)** — quiescence + idle timeout → agent kill
 - **[Agent crash](./flow-agent-crash.md)** — detection and recovery
 - **[CWD health check](./flow-cwd-health.md)** — periodic cleanup of deleted directories
+- **[Message trace](./flow-message-trace.md)** — trace row recording and debug viewer reads
 
 Each page includes anchor code references that link directly to the source.
 
@@ -33,7 +34,7 @@ Each page includes anchor code references that link directly to the source.
 
 - **Ephemeral agents** — Agent processes are disposable. They can be killed after a turn completes. On respawn, the daemon sends `session/resume`; conversation history is owned and replayed by the daemon.
 
-- **SQLite message store** — Session metadata and agent notifications are persisted in `jamsession.db`. Client `session/load` always replays notifications from SQLite, whether the agent is alive or needs to be respawned.
+- **SQLite message and trace store** — Session metadata, agent notifications, and optional trace rows are persisted in `jamsession.db`. Client `session/load` always replays notifications from SQLite, whether the agent is alive or needs to be respawned.
 
 - **Multiple clients per session** — Multiple client connections can be active on a session simultaneously (`client_ids: Vec<ClientId>`). Outgoing messages from the agent are routed to the most-recently-connected client (`.last()`).
 
@@ -43,9 +44,10 @@ Each page includes anchor code references that link directly to the source.
 
 | Module | File | Role |
 |--------|------|------|
-| `dispatcher` | `src/dispatcher.rs` | Central dispatcher: message types, session state, routing, timers, client/agent pipes |
+| `dispatcher` | `src/dispatcher.rs` | Central dispatcher: message types, session state, routing, timers, trace recording, client/agent pipes |
 | `daemon` | `src/daemon.rs` | Socket listener, database opening, accept loop, scope-based task management |
-| `db` | `src/db.rs` | Toasty models and SQLite-backed session/message persistence |
+| `db` | `src/db.rs` | Toasty models plus SQLite-backed session, message, and trace persistence |
+| `debug` | `src/debug.rs` | Local trace viewer server and `/api/traces` query handling |
 | `agent` | `src/agent.rs` | Agent factory trait, transport creation |
 | `session` | `src/session.rs` | `LifecycleEvent` enum (observable outcomes for tests/tracing) |
 | `eof_signal` | `src/eof_signal.rs` | `EofSignalingTransport` wrapper for disconnect detection |

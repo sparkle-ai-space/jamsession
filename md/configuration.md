@@ -5,8 +5,27 @@ Jamsession reads configuration from `~/.jamsession/config.toml` on startup. If t
 ## Config file
 
 ```toml
-# Log verbosity: error, warn, info, debug, trace
-log_level = "info"
+[daemon]
+# Log filter: supports tracing directives (e.g., "debug", "jamsession=debug,acpr=trace")
+log_filter = "info"
+
+# Idle timeout in seconds (default: 900 = 15 minutes)
+idle_timeout_secs = 900
+
+# Quiescence timeout in seconds (default: 10)
+quiescence_timeout_secs = 10
+
+# Record ACP message traces to jamsession.db (default: false)
+trace = true
+
+# Default model to select when creating new sessions (optional).
+# Uses session/set_config_option to set the model after session creation.
+default-model = "default"
+
+# Environment variables set on the daemon process at startup.
+# These are inherited by all spawned agent processes.
+[daemon.env]
+CLAUDE_CODE_EXECUTABLE = "/path/to/claude"
 
 # Agent configuration (pick one of the two forms below)
 [agent]
@@ -19,6 +38,19 @@ name = "claude-acp"
 # args = ["--verbose"]
 # env = { MY_KEY = "value" }
 ```
+
+### Daemon
+
+The `[daemon]` section controls daemon-level settings that apply before any sessions are created.
+
+| Field | Description |
+|-------|-------------|
+| `log_filter` | Tracing filter directive (default: `"info"`). Overridden by `RUST_LOG` env var if set. |
+| `idle_timeout_secs` | Seconds of inactivity before killing the agent process (default: `900`) |
+| `quiescence_timeout_secs` | Seconds of pipe silence after client disconnect before starting the idle timer (default: `10`) |
+| `trace` | Record ACP dispatches and lifecycle events to the SQLite `traces` table (default: `false`). |
+| `default-model` | Model to select via `session/set_config_option` after creating a session. Looks for the config option with `category: "model"`. Skipped if unset or if already the current value. |
+| `env` | Key-value pairs set as environment variables on the daemon process at startup. Inherited by all spawned child processes (agents, npx, etc.). |
 
 ### Agent
 
@@ -35,13 +67,17 @@ If neither `name` nor `custom` is specified, the daemon defaults to `name = "cla
 
 ### Log levels
 
-| Level | What's logged |
+The `log_filter` field accepts any valid `tracing_subscriber::EnvFilter` directive:
+
+| Value | What's logged |
 |-------|--------------|
-| `error` | Failures only |
-| `warn` | Warnings + errors |
-| `info` | Lifecycle events (agent spawn/kill, client connect/disconnect) |
-| `debug` | Detailed lifecycle (timer starts, state transitions) |
-| `trace` | Every ACP message flowing through the daemon |
+| `"error"` | Failures only |
+| `"warn"` | Warnings + errors |
+| `"info"` | Lifecycle events (agent spawn/kill, client connect/disconnect) |
+| `"debug"` | Detailed lifecycle (timer starts, state transitions) |
+| `"trace"` | Every ACP message flowing through the daemon |
+
+You can also use per-crate filters like `"jamsession=debug,acpr=trace"`.
 
 ## File locations
 
@@ -65,11 +101,24 @@ Options:
 Commands:
     daemon    Run the daemon (default)
     acp       Run as stdio ACP client (connects to daemon)
+    debug     Serve the local trace debug viewer
+    kill      Kill a running daemon
 
 jamsession daemon [OPTIONS]
 
 Options:
     --db-path <PATH>       Override the SQLite database location
+    -h, --help             Print help
+
+jamsession debug [OPTIONS]
+
+Options:
+    --db-path <PATH>       Override the SQLite database location
+    --port <PORT>          Localhost port for the viewer (default: 3000)
+    --session <ID>         Filter to a single ACP session ID
+    --since <TIMESTAMP>    Show traces since an RFC3339 timestamp
+    --today                Show traces since midnight UTC today
+    --ago <DURATION>       Show traces since a relative duration such as 30m, 2h, or 1d
     -h, --help             Print help
 ```
 
@@ -77,10 +126,10 @@ The `--config-dir` flag redirects all file paths (socket, database, config, logs
 
 ## Environment variables
 
-- `RUST_LOG` -- Overrides the `log_level` setting in config.toml (standard `tracing` filter syntax).
+- `RUST_LOG` -- Overrides the `daemon.log_filter` setting in config.toml (standard `tracing` filter syntax).
 
 ## Idle timeout
 
-The agent idle timeout defaults to 15 minutes. After a client disconnects and 10 seconds of pipe silence pass (quiescence), the idle timer starts. When it expires, the agent process is killed.
+The agent idle timeout defaults to 15 minutes (`idle_timeout_secs = 900`). After a client disconnects and the quiescence period passes (`quiescence_timeout_secs = 10`), the idle timer starts. When it expires, the agent process is killed.
 
-The timeout is currently not user-configurable via config.toml (it can be overridden programmatically for integration tests).
+Both values are configurable in the `[daemon]` section of config.toml.

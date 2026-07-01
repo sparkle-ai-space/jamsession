@@ -27,3 +27,4 @@ expect-test = "1.5.1"
 rhaicp = "2.1.0"
 serde_json = "1"
 tempfile = "3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

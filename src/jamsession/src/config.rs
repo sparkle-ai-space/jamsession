@@ -11,7 +11,22 @@ use crate::error::Error;
 
 #[derive(Debug, Deserialize, Default)]
 pub struct Config {
+    pub daemon: Option<DaemonConfig>,
     pub agent: Option<AgentConfig>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonConfig {
+    pub log_filter: Option<String>,
+    pub idle_timeout_secs: Option<u64>,
+    pub quiescence_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub trace: bool,
+    #[serde(alias = "default-model")]
+    pub default_model: Option<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -32,6 +47,43 @@ pub struct CustomAgent {
 }
 
 impl Config {
+    pub fn log_filter(&self) -> Option<&str> {
+        self.daemon.as_ref()?.log_filter.as_deref()
+    }
+
+    pub fn default_model(&self) -> Option<&str> {
+        self.daemon.as_ref()?.default_model.as_deref()
+    }
+
+    pub fn idle_timeout(&self) -> std::time::Duration {
+        let secs = self
+            .daemon
+            .as_ref()
+            .and_then(|d| d.idle_timeout_secs)
+            .unwrap_or(900);
+        std::time::Duration::from_secs(secs)
+    }
+
+    pub fn quiescence_timeout(&self) -> std::time::Duration {
+        let secs = self
+            .daemon
+            .as_ref()
+            .and_then(|d| d.quiescence_timeout_secs)
+            .unwrap_or(10);
+        std::time::Duration::from_secs(secs)
+    }
+
+    pub fn trace(&self) -> bool {
+        self.daemon.as_ref().is_some_and(|d| d.trace)
+    }
+
+    pub fn daemon_env(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.daemon
+            .iter()
+            .flat_map(|d| d.env.iter())
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+
     pub fn load(config_dir: &Path) -> Self {
         let path = config_dir.join("config.toml");
         let contents = match std::fs::read_to_string(&path) {
