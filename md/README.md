@@ -6,6 +6,7 @@ Jamsession is a daemon that manages the lifecycle of AI coding agents using the 
 - **Resource efficiency** -- Agent processes are ephemeral. They spin down after idle periods and spin back up on demand via `session/load`.
 - **Single entry point** -- Clients connect to one Unix socket (`~/.jamsession/daemon.sock`). The daemon handles spawning, bridging, and lifecycle for all sessions.
 - **One client per session** -- When a new client takes over a session, the previous one is disconnected automatically.
+- **Opt-in message tracing** -- When `trace = true`, ACP dispatches and daemon lifecycle events are recorded in SQLite and can be inspected with `jamsession debug`.
 
 ## How it works
 

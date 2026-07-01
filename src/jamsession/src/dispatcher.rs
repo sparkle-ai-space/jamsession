@@ -5,13 +5,13 @@ use std::sync::Arc;
 use agent_client_protocol::schema::{
     InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
     LoadSessionRequest, LoadSessionResponse, McpServer, NewSessionRequest, NewSessionResponse,
-    ProtocolVersion, ResumeSessionRequest, ResumeSessionResponse,
-    SessionConfigOptionCategory, SessionId as AcpSessionId, SessionInfo,
-    SetSessionConfigOptionRequest,
+    ProtocolVersion, ResumeSessionRequest, ResumeSessionResponse, SessionConfigOptionCategory,
+    SessionId as AcpSessionId, SessionInfo, SetSessionConfigOptionRequest,
 };
 use agent_client_protocol::util::MatchDispatch;
 use agent_client_protocol::{
-    Agent, ByteStreams, Client, Dispatch, DynConnectTo, HandleDispatchFrom, Handled, Responder,
+    Agent, ByteStreams, Client, Dispatch, DynConnectTo, HandleDispatchFrom, Handled,
+    JsonRpcResponse, Responder,
 };
 use chrono::Utc;
 use futures::StreamExt;
@@ -22,7 +22,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::agent::AgentFactory;
-use crate::db::{SessionRecord, Store};
+use crate::db::{NewTrace, SessionRecord, Store, TraceDirection, TraceKind};
 use crate::session::{LifecycleEvent, LifecycleEventSender};
 
 // ---------------------------------------------------------------------------
@@ -82,6 +82,19 @@ pub(super) enum DispatcherMessage {
         generation: u64,
     },
     CwdHealthCheck,
+
+    // --- Trace capture ---
+    ResponseSent {
+        client_id: ClientId,
+        method: String,
+        request_id: String,
+        payload: serde_json::Value,
+    },
+    ModelSet {
+        session_id: SessionId,
+        from: String,
+        to: String,
+    },
 }
 // ANCHOR_END: daemon-message
 
@@ -169,6 +182,7 @@ pub(super) struct Dispatcher<'scope> {
     default_model: Option<String>,
     event_tx: Option<LifecycleEventSender>,
     dispatcher_tx: mpsc::UnboundedSender<DispatcherMessage>,
+    trace: bool,
     next_agent_id: u64,
 }
 
@@ -184,6 +198,7 @@ impl<'scope> Dispatcher<'scope> {
         default_model: Option<String>,
         event_tx: Option<LifecycleEventSender>,
         dispatcher_tx: mpsc::UnboundedSender<DispatcherMessage>,
+        trace: bool,
     ) -> crate::error::Result<Self> {
         let mut dispatcher = Self {
             tasks,
@@ -201,6 +216,7 @@ impl<'scope> Dispatcher<'scope> {
             default_model,
             event_tx,
             dispatcher_tx,
+            trace,
             next_agent_id: 1,
         };
         dispatcher.rehydrate_from_store().await?;
@@ -239,6 +255,12 @@ impl<'scope> Dispatcher<'scope> {
                 outgoing_tx,
             } => {
                 self.clients.insert(client_id, ClientHandle { outgoing_tx });
+                self.trace_event(
+                    None,
+                    "acp-client",
+                    "client_connected",
+                    serde_json::json!({}),
+                );
                 self.emit(LifecycleEvent::ClientConnected);
             }
             DispatcherMessage::ClientDisconnected { client_id } => {
@@ -292,6 +314,35 @@ impl<'scope> Dispatcher<'scope> {
             DispatcherMessage::CwdHealthCheck => {
                 self.handle_cwd_health_check().await;
             }
+            DispatcherMessage::ResponseSent {
+                client_id,
+                method,
+                request_id,
+                payload,
+            } => {
+                let session_id = self.client_to_session.get(&client_id).cloned();
+                self.trace_record(NewTrace {
+                    session_id,
+                    dir: TraceDirection::DaemonToClient,
+                    role: Some("acp-client".to_string()),
+                    kind: TraceKind::Response,
+                    method: Some(method),
+                    request_id: Some(request_id),
+                    payload,
+                });
+            }
+            DispatcherMessage::ModelSet {
+                session_id,
+                from,
+                to,
+            } => {
+                self.trace_event(
+                    Some(session_id),
+                    "daemon",
+                    "model_set",
+                    serde_json::json!({ "from": from, "to": to }),
+                );
+            }
         }
     }
 
@@ -304,8 +355,20 @@ impl<'scope> Dispatcher<'scope> {
         self.clients.remove(&client_id);
 
         let Some(session_id) = self.client_to_session.remove(&client_id) else {
+            self.trace_event(
+                None,
+                "acp-client",
+                "client_disconnected",
+                serde_json::json!({}),
+            );
             return;
         };
+        self.trace_event(
+            Some(session_id.clone()),
+            "acp-client",
+            "client_disconnected",
+            serde_json::json!({}),
+        );
         let Some(session) = self.sessions.get_mut(&session_id) else {
             return;
         };
@@ -356,6 +419,12 @@ impl<'scope> Dispatcher<'scope> {
     ) {
         self.agents.insert(agent_id, AgentHandle { outgoing_tx });
         self.agent_to_session.insert(agent_id, session_id.clone());
+        self.trace_event(
+            Some(session_id.clone()),
+            "agent",
+            "agent_spawned",
+            serde_json::json!({ "agent_id": agent_id }),
+        );
 
         let is_new = !self.sessions.contains_key(&session_id);
 
@@ -400,6 +469,12 @@ impl<'scope> Dispatcher<'scope> {
             AgentReadyResponder::NewSession(r) => {
                 let _ = r.respond(NewSessionResponse::new(session_id.clone()));
                 if is_new {
+                    self.trace_event(
+                        Some(session_id.clone()),
+                        "daemon",
+                        "session_created",
+                        serde_json::json!({ "session_id": session_id }),
+                    );
                     self.emit(LifecycleEvent::SessionCreated { session_id });
                 }
             }
@@ -411,10 +486,22 @@ impl<'scope> Dispatcher<'scope> {
                     return;
                 }
                 let _ = r.respond(LoadSessionResponse::new());
+                self.trace_event(
+                    Some(session_id.clone()),
+                    "daemon",
+                    "session_loaded",
+                    serde_json::json!({ "session_id": session_id }),
+                );
                 self.emit(LifecycleEvent::SessionLoaded { session_id });
             }
             AgentReadyResponder::ResumeSession(r) => {
                 let _ = r.respond(ResumeSessionResponse::new());
+                self.trace_event(
+                    Some(session_id.clone()),
+                    "daemon",
+                    "session_resumed",
+                    serde_json::json!({ "session_id": session_id }),
+                );
                 self.emit(LifecycleEvent::SessionResumed { session_id });
             }
         }
@@ -441,6 +528,12 @@ impl<'scope> Dispatcher<'scope> {
 
         session.lifecycle_state = LifecycleState::AgentDead;
         tracing::warn!(session_id, "agent disconnected unexpectedly");
+        self.trace_event(
+            Some(session_id),
+            "agent",
+            "agent_crashed",
+            serde_json::json!({ "agent_id": agent_id }),
+        );
     }
     // ANCHOR_END: handle-agent-exited
 
@@ -451,28 +544,40 @@ impl<'scope> Dispatcher<'scope> {
     // ANCHOR: dispatch-session-new
     // ANCHOR: dispatch-session-load
     async fn handle_from_client(&mut self, client_id: ClientId, dispatch: Dispatch) {
+        self.trace_dispatch(
+            self.client_to_session.get(&client_id).cloned(),
+            TraceDirection::ClientToDaemon,
+            "acp-client",
+            &dispatch,
+        );
+
         MatchDispatch::new(dispatch)
             .if_request(async |req: InitializeRequest, responder| {
+                let responder = self.wrap_local_responder(client_id, responder);
                 self.handle_initialize(client_id, req, responder);
                 Ok(())
             })
             .await
             .if_request(async |req: ListSessionsRequest, responder| {
+                let responder = self.wrap_local_responder(client_id, responder);
                 self.handle_list_sessions(req, responder).await;
                 Ok(())
             })
             .await
             .if_request(async |req: NewSessionRequest, responder| {
+                let responder = self.wrap_local_responder(client_id, responder);
                 self.handle_session_new(client_id, req, responder);
                 Ok(())
             })
             .await
             .if_request(async |req: LoadSessionRequest, responder| {
+                let responder = self.wrap_local_responder(client_id, responder);
                 self.handle_session_load(client_id, req, responder).await;
                 Ok(())
             })
             .await
             .if_request(async |req: ResumeSessionRequest, responder| {
+                let responder = self.wrap_local_responder(client_id, responder);
                 self.handle_session_resume(client_id, req, responder);
                 Ok(())
             })
@@ -500,6 +605,12 @@ impl<'scope> Dispatcher<'scope> {
             tracing::warn!(client_id, "dispatch but no agent");
             return;
         };
+        self.trace_dispatch(
+            Some(session_id.clone()),
+            TraceDirection::DaemonToAgent,
+            "agent",
+            &dispatch,
+        );
         let _ = agent.outgoing_tx.send(dispatch);
     }
 
@@ -702,6 +813,12 @@ impl<'scope> Dispatcher<'scope> {
             }
 
             let _ = responder.respond(LoadSessionResponse::new());
+            self.trace_event(
+                Some(session_id.clone()),
+                "daemon",
+                "session_loaded",
+                serde_json::json!({ "session_id": session_id }),
+            );
             self.emit(LifecycleEvent::SessionLoaded { session_id });
         }
     }
@@ -749,6 +866,13 @@ impl<'scope> Dispatcher<'scope> {
             }
 
             let _ = responder.respond(ResumeSessionResponse::new());
+            self.trace_event(
+                Some(session_id.clone()),
+                "daemon",
+                "session_resumed",
+                serde_json::json!({ "session_id": session_id }),
+            );
+            self.emit(LifecycleEvent::SessionResumed { session_id });
         }
     }
 
@@ -808,6 +932,12 @@ impl<'scope> Dispatcher<'scope> {
             tracing::warn!(agent_id, "dispatch from unknown agent");
             return;
         };
+        self.trace_dispatch(
+            Some(session_id.clone()),
+            TraceDirection::AgentToDaemon,
+            "agent",
+            &dispatch,
+        );
         let Some(session) = self.sessions.get_mut(&session_id) else {
             return;
         };
@@ -824,6 +954,12 @@ impl<'scope> Dispatcher<'scope> {
         if let Some(&cid) = session.client_ids.last()
             && let Some(client) = self.clients.get(&cid)
         {
+            self.trace_dispatch(
+                Some(session_id),
+                TraceDirection::DaemonToClient,
+                "acp-client",
+                &dispatch,
+            );
             let _ = client.outgoing_tx.send(dispatch);
         }
     }
@@ -843,6 +979,12 @@ impl<'scope> Dispatcher<'scope> {
 
         session.lifecycle_state = LifecycleState::Quiescent;
 
+        self.trace_event(
+            Some(session_id.to_string()),
+            "agent",
+            "agent_quiescent",
+            serde_json::json!({}),
+        );
         self.emit(LifecycleEvent::AgentQuiescent {
             session_id: session_id.to_string(),
         });
@@ -876,6 +1018,12 @@ impl<'scope> Dispatcher<'scope> {
         session.lifecycle_state = LifecycleState::AgentDead;
 
         tracing::info!(session_id, "agent killed due to idle timeout");
+        self.trace_event(
+            Some(session_id.to_string()),
+            "agent",
+            "agent_killed_idle",
+            serde_json::json!({}),
+        );
         self.emit(LifecycleEvent::AgentKilledIdle {
             session_id: session_id.to_string(),
         });
@@ -920,6 +1068,97 @@ impl<'scope> Dispatcher<'scope> {
         }
     }
 
+    fn wrap_local_responder<T>(&self, client_id: ClientId, responder: Responder<T>) -> Responder<T>
+    where
+        T: JsonRpcResponse,
+    {
+        if !self.trace {
+            return responder;
+        }
+
+        let dispatcher_tx = self.dispatcher_tx.clone();
+        let request_id = json_id_to_string(&responder.id());
+        responder.wrap_params(
+            move |method, result: Result<T, agent_client_protocol::Error>| {
+                let payload = match &result {
+                    Ok(value) => match value.clone().into_json(method) {
+                        Ok(result) => serde_json::json!({ "result": result }),
+                        Err(error) => serde_json::json!({ "error": error.to_string() }),
+                    },
+                    Err(error) => serde_json::json!({ "error": error.to_string() }),
+                };
+                let _ = dispatcher_tx.send(DispatcherMessage::ResponseSent {
+                    client_id,
+                    method: method.to_string(),
+                    request_id,
+                    payload,
+                });
+                result
+            },
+        )
+    }
+
+    fn trace_dispatch(
+        &self,
+        session_id: Option<String>,
+        dir: TraceDirection,
+        role: &str,
+        dispatch: &Dispatch,
+    ) {
+        if !self.trace {
+            return;
+        }
+
+        let kind = match dispatch {
+            Dispatch::Request(_, _) => TraceKind::Request,
+            Dispatch::Notification(_) => TraceKind::Notification,
+            Dispatch::Response(_, _) => TraceKind::Response,
+        };
+        let payload = match dispatch {
+            Dispatch::Request(msg, _) | Dispatch::Notification(msg) => msg.params.clone(),
+            Dispatch::Response(result, _) => match result {
+                Ok(value) => serde_json::json!({ "result": value }),
+                Err(error) => serde_json::json!({ "error": error.to_string() }),
+            },
+        };
+        self.trace_record(NewTrace {
+            session_id,
+            dir,
+            role: Some(role.to_string()),
+            kind,
+            method: Some(dispatch.method().to_string()),
+            request_id: dispatch.id().map(|id| json_id_to_string(&id)),
+            payload,
+        });
+    }
+
+    fn trace_event(
+        &self,
+        session_id: Option<String>,
+        role: &str,
+        method: &str,
+        payload: serde_json::Value,
+    ) {
+        self.trace_record(NewTrace {
+            session_id,
+            dir: TraceDirection::Internal,
+            role: Some(role.to_string()),
+            kind: TraceKind::Event,
+            method: Some(method.to_string()),
+            request_id: None,
+            payload,
+        });
+    }
+
+    fn trace_record(&self, trace: NewTrace) {
+        if !self.trace {
+            return;
+        }
+        if let Err(e) = self.store.record_trace(trace) {
+            tracing::error!(error = %e, "failed to record trace");
+        }
+    }
+
     async fn replay_session_to_client(
         &self,
         session_id: &str,
@@ -944,6 +1183,13 @@ impl<'scope> Dispatcher<'scope> {
         let id = self.next_agent_id;
         self.next_agent_id += 1;
         id
+    }
+}
+
+fn json_id_to_string(id: &serde_json::Value) -> String {
+    match id {
+        serde_json::Value::String(s) => s.clone(),
+        _ => id.to_string(),
     }
 }
 
@@ -1077,6 +1323,7 @@ async fn agent_pipe(
                         if let Some(ref desired_model) = spawn_request.default_model {
                             set_model_config_option(
                                 &cx,
+                                dispatcher_tx.clone(),
                                 &session_id,
                                 desired_model,
                                 resp.config_options.as_deref(),
@@ -1183,6 +1430,7 @@ use agent_client_protocol::schema::SessionConfigKind;
 
 async fn set_model_config_option(
     cx: &agent_client_protocol::ConnectionTo<agent_client_protocol::Agent>,
+    dispatcher_tx: mpsc::UnboundedSender<DispatcherMessage>,
     session_id: &str,
     desired_model: &str,
     config_options: Option<&[agent_client_protocol::schema::SessionConfigOption]>,
@@ -1192,9 +1440,9 @@ async fn set_model_config_option(
         return;
     };
 
-    let model_option = options.iter().find(|opt| {
-        opt.category == Some(SessionConfigOptionCategory::Model)
-    });
+    let model_option = options
+        .iter()
+        .find(|opt| opt.category == Some(SessionConfigOptionCategory::Model));
 
     let Some(model_option) = model_option else {
         tracing::debug!("no model config option found, skipping model set");
@@ -1210,9 +1458,10 @@ async fn set_model_config_option(
         tracing::debug!(model = desired_model, "model already set to desired value");
         return;
     }
+    let current_model = select.current_value.0.to_string();
 
     tracing::info!(
-        from = %select.current_value.0,
+        from = %current_model,
         to = desired_model,
         "setting model via session/set_config_option"
     );
@@ -1227,6 +1476,11 @@ async fn set_model_config_option(
     match cx.send_request(req).block_task().await {
         Ok(_resp) => {
             tracing::info!(model = desired_model, "model set successfully");
+            let _ = dispatcher_tx.send(DispatcherMessage::ModelSet {
+                session_id: session_id.to_string(),
+                from: current_model,
+                to: desired_model.to_string(),
+            });
         }
         Err(e) => {
             tracing::warn!(model = desired_model, error = %e, "failed to set model");

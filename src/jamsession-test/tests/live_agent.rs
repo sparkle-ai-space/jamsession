@@ -27,15 +27,18 @@ async fn live_agent_responds_to_prompt() {
 
     let dir = tempfile::TempDir::new().unwrap();
     let socket_path = dir.path().join("daemon.sock");
-    let state_path = dir.path().join("state.json");
+    let db_path = dir.path().join("jamsession.db");
 
     let (lifecycle_tx, mut lifecycle_rx) = mpsc::unbounded_channel();
 
     let socket_clone = socket_path.clone();
+    let daemon_db_path = db_path.clone();
     let _handle = tokio::spawn(async move {
-        let daemon = Daemon::new_with_paths(&state_path, &socket_clone)
+        let daemon = Daemon::new_with_paths(&daemon_db_path, &socket_clone)
             .with_factory(Arc::new(AcprFactory::default()))
             .with_default_model(Some("default".to_string()))
+            .with_trace(true)
+            .with_send_guidelines(false)
             .with_lifecycle_events(lifecycle_tx);
         let _ = daemon.run().await;
     });
@@ -51,8 +54,7 @@ async fn live_agent_responds_to_prompt() {
     .await
     .expect("daemon did not initialize in time");
 
-    let transport =
-        jamsession_test::transport::UnixSocketTransport::new(&socket_path);
+    let transport = jamsession_test::transport::UnixSocketTransport::new(&socket_path);
     let result = rhaicp::client::RhaiClient::new()
         .cwd("/tmp")
         .execute(
@@ -62,11 +64,35 @@ async fn live_agent_responds_to_prompt() {
                 s.prompt("Hi, who is this?")
             "#,
         )
-        .await
-        .expect("client script failed");
+        .await;
 
-    println!("Agent response: [{result}]");
+    match &result {
+        Ok(result) => println!("Agent response: [{result}]"),
+        Err(error) => println!("Agent error: {error}"),
+    }
+
+    let store = jamsession::db::Store::open(&db_path)
+        .await
+        .expect("failed to reopen trace database");
+    let traces = store
+        .traces(jamsession::db::TraceQuery::default())
+        .expect("failed to query traces");
+    println!("Trace rows: {}", traces.len());
+    for trace in traces {
+        println!(
+            "#{:03} {:?} {:?} {:?} {:?} id={:?} payload={}",
+            trace.id,
+            trace.dir,
+            trace.role,
+            trace.kind,
+            trace.method,
+            trace.request_id,
+            trace.payload
+        );
+    }
+
     // The response may be empty if the agent streams via session/update
     // notifications rather than returning text in the prompt response.
     // The key assertion is that we get here without errors.
+    result.expect("client script failed");
 }

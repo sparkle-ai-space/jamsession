@@ -28,6 +28,27 @@ enum Command {
     Acp,
     /// Kill a running daemon
     Kill,
+    /// Serve the local trace debug viewer
+    Debug {
+        /// Path to the SQLite database
+        #[arg(long)]
+        db_path: Option<PathBuf>,
+        /// Localhost port for the viewer
+        #[arg(long, default_value_t = 3000)]
+        port: u16,
+        /// Filter to a single ACP session ID
+        #[arg(long)]
+        session: Option<String>,
+        /// Show traces since an RFC3339 timestamp
+        #[arg(long, conflicts_with_all = ["today", "ago"])]
+        since: Option<String>,
+        /// Show traces since midnight UTC today
+        #[arg(long, conflicts_with = "ago")]
+        today: bool,
+        /// Show traces since a relative duration such as 30m, 2h, or 1d
+        #[arg(long)]
+        ago: Option<String>,
+    },
 }
 
 fn init_daemon_logging(config_dir: &Path, log_filter: Option<&str>) {
@@ -44,9 +65,8 @@ fn init_daemon_logging(config_dir: &Path, log_filter: Option<&str>) {
     // Leak the guard so it lives for the process lifetime
     std::mem::forget(_guard);
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new(log_filter.unwrap_or("info"))
-    });
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(log_filter.unwrap_or("info")));
 
     tracing_subscriber::registry()
         .with(filter)
@@ -77,6 +97,7 @@ async fn main() {
             let idle_timeout = config.idle_timeout();
             let quiescence_timeout = config.quiescence_timeout();
             let default_model = config.default_model().map(String::from);
+            let trace = config.trace();
             let factory = config.into_factory();
 
             let db_path = db_path.unwrap_or_else(|| config_dir.join("jamsession.db"));
@@ -96,7 +117,8 @@ async fn main() {
                 .with_factory(factory)
                 .with_idle_timeout(idle_timeout)
                 .with_quiescence_timeout(quiescence_timeout)
-                .with_default_model(default_model);
+                .with_default_model(default_model)
+                .with_trace(trace);
 
             let shutdown = tokio::signal::ctrl_c();
             tokio::select! {
@@ -117,6 +139,43 @@ async fn main() {
         }
         Command::Kill => {
             kill_daemon(&config_dir);
+        }
+        Command::Debug {
+            db_path,
+            port,
+            session,
+            since,
+            today,
+            ago,
+        } => {
+            tracing_subscriber::fmt::init();
+            let since = match (since, today, ago) {
+                (Some(since), _, _) => match jamsession::debug::parse_since(&since) {
+                    Ok(since) => Some(since),
+                    Err(e) => {
+                        eprintln!("invalid --since: {e}");
+                        std::process::exit(2);
+                    }
+                },
+                (None, true, _) => Some(jamsession::debug::midnight_today_utc()),
+                (None, false, Some(ago)) => match jamsession::debug::parse_ago(&ago) {
+                    Ok(since) => Some(since),
+                    Err(e) => {
+                        eprintln!("invalid --ago: {e}");
+                        std::process::exit(2);
+                    }
+                },
+                (None, false, None) => None,
+            };
+            let filters = jamsession::debug::DebugFilters {
+                session_id: session,
+                since,
+            };
+            let db_path = db_path.unwrap_or_else(|| config_dir.join("jamsession.db"));
+            if let Err(e) = jamsession::debug::run_debug_server(&db_path, port, filters).await {
+                eprintln!("debug server error: {e}");
+                std::process::exit(1);
+            }
         }
     }
 }

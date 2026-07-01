@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use jamsession::agent::BinaryFactory;
+use jamsession::db::{TraceDirection, TraceKind, TraceQuery};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
@@ -18,12 +19,21 @@ async fn start_daemon(
     socket_path: &std::path::Path,
     db_path: &std::path::Path,
 ) -> tokio::task::JoinHandle<()> {
+    start_daemon_with_trace(socket_path, db_path, false).await
+}
+
+async fn start_daemon_with_trace(
+    socket_path: &std::path::Path,
+    db_path: &std::path::Path,
+    trace: bool,
+) -> tokio::task::JoinHandle<()> {
     let socket_path_clone = socket_path.to_path_buf();
     let db_path = db_path.to_path_buf();
     let mock_binary = mock_agent_binary();
     let handle = tokio::spawn(async move {
         let daemon = jamsession::daemon::Daemon::new_with_paths(&db_path, &socket_path_clone)
-            .with_factory(Arc::new(BinaryFactory::new(mock_binary)));
+            .with_factory(Arc::new(BinaryFactory::new(mock_binary)))
+            .with_trace(trace);
         let _ = daemon.run().await;
     });
 
@@ -34,6 +44,17 @@ async fn start_daemon(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     panic!("daemon did not start in time");
+}
+
+async fn wait_for_trace_count(db_path: &std::path::Path, min_count: usize) {
+    let store = jamsession::db::Store::open(db_path).await.unwrap();
+    for _ in 0..50 {
+        if store.traces(TraceQuery::default()).unwrap().len() >= min_count {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("trace count did not reach {min_count}");
 }
 
 async fn send_request(stream: &mut UnixStream, request: serde_json::Value) -> serde_json::Value {
@@ -94,6 +115,137 @@ async fn new_session_creates_session_and_returns_id() {
     let result = response.get("result").expect("expected result");
     let session_id = result["sessionId"].as_str().unwrap();
     assert!(!session_id.is_empty(), "got empty session id");
+}
+
+#[tokio::test]
+async fn tracing_disabled_writes_no_trace_rows() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let socket_path = dir.path().join("daemon.sock");
+    let db_path = dir.path().join("jamsession.db");
+
+    let _handle = start_daemon(&socket_path, &db_path).await;
+
+    let mut stream = UnixStream::connect(&socket_path).await.unwrap();
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "session/new",
+        "params": {
+            "cwd": "/tmp",
+            "additionalDirectories": [],
+            "mcpServers": []
+        }
+    });
+
+    let response = send_request(&mut stream, request).await;
+    assert!(response.get("result").is_some());
+
+    let store = jamsession::db::Store::open(&db_path).await.unwrap();
+    assert!(store.traces(TraceQuery::default()).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn tracing_records_session_lifecycle_and_prompt_flow() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let socket_path = dir.path().join("daemon.sock");
+    let db_path = dir.path().join("jamsession.db");
+
+    let _handle = start_daemon_with_trace(&socket_path, &db_path, true).await;
+
+    let mut stream = UnixStream::connect(&socket_path).await.unwrap();
+    let create_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "session/new",
+        "params": {
+            "cwd": "/tmp",
+            "additionalDirectories": [],
+            "mcpServers": []
+        }
+    });
+    let create_resp = send_request(&mut stream, create_req).await;
+    let session_id = create_resp["result"]["sessionId"].as_str().unwrap();
+
+    let prompt_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "session/prompt",
+        "params": {
+            "sessionId": session_id,
+            "prompt": [
+                { "type": "text", "text": "hello trace" }
+            ]
+        }
+    });
+    let prompt_resp = send_request(&mut stream, prompt_req).await;
+    assert!(prompt_resp.get("result").is_some(), "{prompt_resp}");
+
+    let mut load_stream = UnixStream::connect(&socket_path).await.unwrap();
+    let load_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "session/load",
+        "params": {
+            "sessionId": session_id,
+            "cwd": "/tmp",
+            "mcpServers": []
+        }
+    });
+    let load_resp = send_request(&mut load_stream, load_req).await;
+    assert!(load_resp.get("result").is_some(), "{load_resp}");
+
+    let mut resume_stream = UnixStream::connect(&socket_path).await.unwrap();
+    let resume_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "session/resume",
+        "params": {
+            "sessionId": session_id,
+            "cwd": "/tmp",
+            "mcpServers": []
+        }
+    });
+    let resume_resp = send_request(&mut resume_stream, resume_req).await;
+    assert!(resume_resp.get("result").is_some(), "{resume_resp}");
+
+    wait_for_trace_count(&db_path, 10).await;
+    let store = jamsession::db::Store::open(&db_path).await.unwrap();
+    let traces = store.traces(TraceQuery::default()).unwrap();
+
+    assert!(traces.iter().any(|trace| {
+        trace.kind == TraceKind::Event && trace.method.as_deref() == Some("client_connected")
+    }));
+    assert!(traces.iter().any(|trace| {
+        trace.kind == TraceKind::Event && trace.method.as_deref() == Some("session_created")
+    }));
+    assert!(traces.iter().any(|trace| {
+        trace.kind == TraceKind::Response
+            && trace.dir == TraceDirection::DaemonToClient
+            && trace.method.as_deref() == Some("session/new")
+            && trace.session_id.as_deref() == Some(session_id)
+    }));
+    assert!(traces.iter().any(|trace| {
+        trace.kind == TraceKind::Request
+            && trace.dir == TraceDirection::ClientToDaemon
+            && trace.method.as_deref() == Some("session/prompt")
+            && trace.request_id.as_deref() == Some("2")
+    }));
+    assert!(traces.iter().any(|trace| {
+        trace.kind == TraceKind::Request
+            && trace.dir == TraceDirection::DaemonToAgent
+            && trace.method.as_deref() == Some("session/prompt")
+    }));
+    assert!(traces.iter().any(|trace| {
+        trace.kind == TraceKind::Notification
+            && trace.dir == TraceDirection::DaemonToClient
+            && trace.method.as_deref() == Some("session/update")
+    }));
+    assert!(traces.iter().any(|trace| {
+        trace.kind == TraceKind::Event && trace.method.as_deref() == Some("session_loaded")
+    }));
+    assert!(traces.iter().any(|trace| {
+        trace.kind == TraceKind::Event && trace.method.as_deref() == Some("session_resumed")
+    }));
 }
 
 #[tokio::test]

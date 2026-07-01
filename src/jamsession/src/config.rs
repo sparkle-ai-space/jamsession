@@ -21,6 +21,8 @@ pub struct DaemonConfig {
     pub log_filter: Option<String>,
     pub idle_timeout_secs: Option<u64>,
     pub quiescence_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub trace: bool,
     #[serde(alias = "default-model")]
     pub default_model: Option<String>,
     #[serde(default)]
@@ -54,13 +56,25 @@ impl Config {
     }
 
     pub fn idle_timeout(&self) -> std::time::Duration {
-        let secs = self.daemon.as_ref().and_then(|d| d.idle_timeout_secs).unwrap_or(900);
+        let secs = self
+            .daemon
+            .as_ref()
+            .and_then(|d| d.idle_timeout_secs)
+            .unwrap_or(900);
         std::time::Duration::from_secs(secs)
     }
 
     pub fn quiescence_timeout(&self) -> std::time::Duration {
-        let secs = self.daemon.as_ref().and_then(|d| d.quiescence_timeout_secs).unwrap_or(10);
+        let secs = self
+            .daemon
+            .as_ref()
+            .and_then(|d| d.quiescence_timeout_secs)
+            .unwrap_or(10);
         std::time::Duration::from_secs(secs)
+    }
+
+    pub fn trace(&self) -> bool {
+        self.daemon.as_ref().is_some_and(|d| d.trace)
     }
 
     pub fn daemon_env(&self) -> impl Iterator<Item = (&str, &str)> {

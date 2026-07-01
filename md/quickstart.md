@@ -70,3 +70,20 @@ jamsession acp
 ```
 
 If the daemon isn't running, it will be started automatically.
+
+## Debugging message flow
+
+Enable trace recording in `~/.jamsession/config.toml`:
+
+```toml
+[daemon]
+trace = true
+```
+
+Restart the daemon, exercise a session, then open the local trace viewer:
+
+```sh
+jamsession debug
+```
+
+The viewer listens on `http://127.0.0.1:3000` by default and live-polls trace rows from `~/.jamsession/jamsession.db`. Use `--session`, `--since`, `--today`, or `--ago 30m` to narrow the initial view.

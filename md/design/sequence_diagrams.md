@@ -8,3 +8,4 @@ Each page below walks through a major daemon flow with a mermaid diagram, step-b
 - [Idle spin-down](./flow-idle-spindown.md) — quiescence + idle timeout → agent kill
 - [Agent crash](./flow-agent-crash.md) — detection and recovery
 - [CWD health check](./flow-cwd-health.md) — periodic cleanup of deleted directories
+- [Message trace](./flow-message-trace.md) — dispatcher trace points and debug viewer reads

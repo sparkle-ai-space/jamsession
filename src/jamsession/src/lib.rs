@@ -5,6 +5,7 @@ pub mod agent;
 pub mod config;
 pub mod daemon;
 pub mod db;
+pub mod debug;
 mod dispatcher;
 mod eof_signal;
 pub mod error;

@@ -15,6 +15,9 @@ idle_timeout_secs = 900
 # Quiescence timeout in seconds (default: 10)
 quiescence_timeout_secs = 10
 
+# Record ACP message traces to jamsession.db (default: false)
+trace = true
+
 # Default model to select when creating new sessions (optional).
 # Uses session/set_config_option to set the model after session creation.
 default-model = "default"
@@ -45,6 +48,7 @@ The `[daemon]` section controls daemon-level settings that apply before any sess
 | `log_filter` | Tracing filter directive (default: `"info"`). Overridden by `RUST_LOG` env var if set. |
 | `idle_timeout_secs` | Seconds of inactivity before killing the agent process (default: `900`) |
 | `quiescence_timeout_secs` | Seconds of pipe silence after client disconnect before starting the idle timer (default: `10`) |
+| `trace` | Record ACP dispatches and lifecycle events to the SQLite `traces` table (default: `false`). |
 | `default-model` | Model to select via `session/set_config_option` after creating a session. Looks for the config option with `category: "model"`. Skipped if unset or if already the current value. |
 | `env` | Key-value pairs set as environment variables on the daemon process at startup. Inherited by all spawned child processes (agents, npx, etc.). |
 
@@ -97,11 +101,24 @@ Options:
 Commands:
     daemon    Run the daemon (default)
     acp       Run as stdio ACP client (connects to daemon)
+    debug     Serve the local trace debug viewer
+    kill      Kill a running daemon
 
 jamsession daemon [OPTIONS]
 
 Options:
     --db-path <PATH>       Override the SQLite database location
+    -h, --help             Print help
+
+jamsession debug [OPTIONS]
+
+Options:
+    --db-path <PATH>       Override the SQLite database location
+    --port <PORT>          Localhost port for the viewer (default: 3000)
+    --session <ID>         Filter to a single ACP session ID
+    --since <TIMESTAMP>    Show traces since an RFC3339 timestamp
+    --today                Show traces since midnight UTC today
+    --ago <DURATION>       Show traces since a relative duration such as 30m, 2h, or 1d
     -h, --help             Print help
 ```
 

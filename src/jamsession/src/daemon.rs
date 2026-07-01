@@ -21,6 +21,7 @@ pub struct Daemon {
     quiescence_timeout: std::time::Duration,
     send_guidelines: bool,
     default_model: Option<String>,
+    trace: bool,
     lifecycle_tx: Option<LifecycleEventSender>,
     shutdown_token: Option<CancellationToken>,
 }
@@ -36,6 +37,7 @@ impl Daemon {
             quiescence_timeout: std::time::Duration::from_secs(10),
             send_guidelines: true,
             default_model: None,
+            trace: false,
             lifecycle_tx: None,
             shutdown_token: None,
         }
@@ -51,6 +53,7 @@ impl Daemon {
             quiescence_timeout: std::time::Duration::from_secs(10),
             send_guidelines: true,
             default_model: None,
+            trace: false,
             lifecycle_tx: None,
             shutdown_token: None,
         }
@@ -78,6 +81,11 @@ impl Daemon {
 
     pub fn with_default_model(mut self, model: Option<String>) -> Self {
         self.default_model = model;
+        self
+    }
+
+    pub fn with_trace(mut self, trace: bool) -> Self {
+        self.trace = trace;
         self
     }
 
@@ -195,6 +203,7 @@ impl Daemon {
                     self.default_model.clone(),
                     self.lifecycle_tx.clone(),
                     dispatcher_tx,
+                    self.trace,
                 )
                 .await?;
 

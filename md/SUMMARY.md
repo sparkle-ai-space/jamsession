@@ -11,6 +11,7 @@
 
 - [About RFDs](./rfds/README.md)
 - [Accepted](./rfds/accepted.md)
+  - [Message trace & debug viewer](./rfds/message-trace/README.md)
   - [Session persistence](./rfds/session-persistence/README.md)
 - [Completed](./rfds/completed.md)
   - [RFD process](./rfds/rfd-process/README.md)
@@ -25,3 +26,4 @@
     - [Flow: idle spin-down](./design/flow-idle-spindown.md)
     - [Flow: agent crash](./design/flow-agent-crash.md)
     - [Flow: cwd health check](./design/flow-cwd-health.md)
+    - [Flow: message trace](./design/flow-message-trace.md)
