@@ -49,7 +49,7 @@ async fn start_daemon_with_trace(
 async fn wait_for_trace_count(db_path: &std::path::Path, min_count: usize) {
     let store = jamsession::db::Store::open(db_path).await.unwrap();
     for _ in 0..50 {
-        if store.traces(TraceQuery::default()).unwrap().len() >= min_count {
+        if store.traces(TraceQuery::default()).await.unwrap().len() >= min_count {
             return;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -141,7 +141,13 @@ async fn tracing_disabled_writes_no_trace_rows() {
     assert!(response.get("result").is_some());
 
     let store = jamsession::db::Store::open(&db_path).await.unwrap();
-    assert!(store.traces(TraceQuery::default()).unwrap().is_empty());
+    assert!(
+        store
+            .traces(TraceQuery::default())
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -210,7 +216,7 @@ async fn tracing_records_session_lifecycle_and_prompt_flow() {
 
     wait_for_trace_count(&db_path, 10).await;
     let store = jamsession::db::Store::open(&db_path).await.unwrap();
-    let traces = store.traces(TraceQuery::default()).unwrap();
+    let traces = store.traces(TraceQuery::default()).await.unwrap();
 
     assert!(traces.iter().any(|trace| {
         trace.kind == TraceKind::Event && trace.method.as_deref() == Some("client_connected")

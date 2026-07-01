@@ -77,7 +77,7 @@ async fn handle_connection(
         }
         "/api/traces" => {
             let query = trace_query_from_params(parse_query(query), filters)?;
-            let traces = store.traces(query)?;
+            let traces = store.traces(query).await?;
             let body = serde_json::to_string(&serde_json::json!({ "traces": traces }))?;
             write_response(&mut stream, "200 OK", "application/json", &body).await?;
         }
@@ -433,6 +433,7 @@ mod tests {
                 request_id: Some("1".to_string()),
                 payload: serde_json::json!({ "text": "hello" }),
             })
+            .await
             .unwrap();
         store
             .record_trace(NewTrace {
@@ -444,6 +445,7 @@ mod tests {
                 request_id: None,
                 payload: serde_json::json!({}),
             })
+            .await
             .unwrap();
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();

@@ -25,17 +25,14 @@ pub enum Error {
     #[error("database error: {0}")]
     Db(#[from] toasty::Error),
 
-    #[error("sqlite error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
-
     #[error("timestamp parse error: {0}")]
     Timestamp(#[from] chrono::ParseError),
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("unsupported database schema version {found}; expected {expected}")]
-    SchemaVersion { found: u32, expected: u32 },
+    #[error("trace parse error: {0}")]
+    TraceParse(#[from] crate::db::TraceParseError),
 }
 
 impl scope_tasks::SpawnError for Error {

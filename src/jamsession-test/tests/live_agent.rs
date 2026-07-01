@@ -76,6 +76,7 @@ async fn live_agent_responds_to_prompt() {
         .expect("failed to reopen trace database");
     let traces = store
         .traces(jamsession::db::TraceQuery::default())
+        .await
         .expect("failed to query traces");
     println!("Trace rows: {}", traces.len());
     for trace in traces {

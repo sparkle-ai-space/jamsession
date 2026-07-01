@@ -4,8 +4,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use toasty::stmt::{List, Query};
 
-const CURRENT_SCHEMA_VERSION: u32 = 2;
-
 #[derive(Debug, toasty::Model)]
 pub struct Session {
     #[key]
@@ -33,6 +31,26 @@ pub struct Message {
     pub payload: String,
 }
 
+#[derive(Debug, toasty::Model)]
+pub struct Trace {
+    #[key]
+    #[auto]
+    pub id: u64,
+
+    #[index]
+    pub ts: String,
+
+    #[index]
+    pub session_id: Option<String>,
+
+    pub dir: String,
+    pub role: Option<String>,
+    pub kind: String,
+    pub method: Option<String>,
+    pub request_id: Option<String>,
+    pub payload: toasty::Json<serde_json::Value>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionRecord {
     pub session_id: String,
@@ -43,7 +61,6 @@ pub struct SessionRecord {
 
 #[derive(Debug, Clone)]
 pub struct Store {
-    path: Option<PathBuf>,
     db: toasty::Db,
 }
 
@@ -106,30 +123,30 @@ impl Store {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        let needs_schema = configure_sqlite_file(path)?;
-
         let db = toasty::Db::builder()
-            .models(toasty::models!(Session, Message))
+            .models(toasty::models!(Session, Message, Trace))
             .build(toasty_driver_sqlite::Sqlite::open(path))
             .await?;
-        if needs_schema {
+
+        configure_sqlite_file(&db).await?;
+
+        if !table_exists(&db, "sessions").await? {
             db.push_schema().await?;
+        } else if !table_exists(&db, "traces").await? {
+            create_trace_schema(&db).await?;
         }
 
-        Ok(Self {
-            path: Some(path.to_path_buf()),
-            db,
-        })
+        Ok(Self { db })
     }
 
     pub async fn in_memory() -> crate::error::Result<Self> {
         let db = toasty::Db::builder()
-            .models(toasty::models!(Session, Message))
+            .models(toasty::models!(Session, Message, Trace))
             .build(toasty_driver_sqlite::Sqlite::in_memory())
             .await?;
         db.push_schema().await?;
 
-        Ok(Self { path: None, db })
+        Ok(Self { db })
     }
 
     pub async fn list_sessions(
@@ -218,9 +235,7 @@ impl Store {
     pub async fn remove_session(&self, session_id: &str) -> crate::error::Result<()> {
         let mut db = self.db.clone();
 
-        if let Some(path) = &self.path {
-            remove_traces_for_session(path, session_id)?;
-        }
+        remove_traces_for_session(&self.db, session_id).await?;
 
         Message::filter(Message::fields().session_id().eq(session_id))
             .delete()
@@ -234,22 +249,27 @@ impl Store {
         Ok(())
     }
 
-    pub fn record_trace(&self, trace: NewTrace) -> crate::error::Result<()> {
-        let Some(path) = &self.path else {
-            return Ok(());
-        };
+    pub async fn record_trace(&self, trace: NewTrace) -> crate::error::Result<()> {
+        let mut db = self.db.clone();
 
-        let connection = rusqlite::Connection::open(path)?;
-        insert_trace(&connection, trace)
+        toasty::create!(Trace {
+            ts: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            session_id: trace.session_id,
+            dir: trace.dir.as_str().to_string(),
+            role: trace.role,
+            kind: trace.kind.as_str().to_string(),
+            method: trace.method,
+            request_id: trace.request_id,
+            payload: trace.payload,
+        })
+        .exec(&mut db)
+        .await?;
+
+        Ok(())
     }
 
-    pub fn traces(&self, query: TraceQuery) -> crate::error::Result<Vec<TraceRecord>> {
-        let Some(path) = &self.path else {
-            return Ok(Vec::new());
-        };
-
-        let connection = rusqlite::Connection::open(path)?;
-        select_traces(&connection, query)
+    pub async fn traces(&self, query: TraceQuery) -> crate::error::Result<Vec<TraceRecord>> {
+        select_traces(&self.db, query).await
     }
 }
 
@@ -266,58 +286,37 @@ impl TryFrom<Session> for SessionRecord {
     }
 }
 
-fn configure_sqlite_file(path: &Path) -> crate::error::Result<bool> {
-    let connection = rusqlite::Connection::open(path)?;
-    connection.pragma_update(None, "journal_mode", "WAL")?;
-    let needs_schema = !connection.query_row(
-        "SELECT EXISTS (
-            SELECT 1 FROM sqlite_master
-            WHERE type = 'table' AND name = 'sessions'
-        )",
-        [],
-        |row| row.get::<_, bool>(0),
-    )?;
-    connection.execute(
-        "CREATE TABLE IF NOT EXISTS schema_version (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            version INTEGER NOT NULL
-        )",
-        [],
-    )?;
-    connection.execute(
-        "INSERT INTO schema_version (id, version)
-         VALUES (1, 1)
-         ON CONFLICT(id) DO NOTHING",
-        [],
-    )?;
-    let schema_version = connection.query_row(
-        "SELECT version FROM schema_version WHERE id = 1",
-        [],
-        |row| row.get::<_, u32>(0),
-    )?;
-    match schema_version {
-        1 => {
-            create_trace_schema(&connection)?;
-            connection.execute(
-                "UPDATE schema_version SET version = ?1 WHERE id = 1",
-                [CURRENT_SCHEMA_VERSION],
-            )?;
-        }
-        CURRENT_SCHEMA_VERSION => {
-            create_trace_schema(&connection)?;
-        }
-        found => {
-            return Err(crate::error::Error::SchemaVersion {
-                found,
-                expected: CURRENT_SCHEMA_VERSION,
-            });
-        }
-    }
-    Ok(needs_schema)
+async fn configure_sqlite_file(db: &toasty::Db) -> crate::error::Result<()> {
+    let mut db = db.clone();
+    toasty::sql::query("PRAGMA journal_mode = WAL")
+        .exec(&mut db)
+        .await?;
+    Ok(())
 }
 
-fn create_trace_schema(connection: &rusqlite::Connection) -> crate::error::Result<()> {
-    connection.execute_batch(
+async fn table_exists(db: &toasty::Db, table_name: &str) -> crate::error::Result<bool> {
+    let mut db = db.clone();
+    let rows = toasty::sql::query(
+        "SELECT EXISTS (
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'table' AND name = ?1
+        )",
+    )
+    .bind(table_name)
+    .column_types([toasty::stmt::Type::Bool])
+    .exec(&mut db)
+    .await?;
+
+    Ok(matches!(
+        rows.as_slice(),
+        [toasty::stmt::Value::Record(record)]
+            if matches!(record.as_slice(), [toasty::stmt::Value::Bool(true)])
+    ))
+}
+
+async fn create_trace_schema(db: &toasty::Db) -> crate::error::Result<()> {
+    let mut db = db.clone();
+    toasty::sql::statement(
         "
         CREATE TABLE IF NOT EXISTS traces (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -330,122 +329,67 @@ fn create_trace_schema(connection: &rusqlite::Connection) -> crate::error::Resul
             request_id TEXT,
             payload TEXT NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS idx_traces_session ON traces(session_id);
-        CREATE INDEX IF NOT EXISTS idx_traces_ts ON traces(ts);
         ",
-    )?;
+    )
+    .exec(&mut db)
+    .await?;
+    toasty::sql::statement(
+        "CREATE INDEX IF NOT EXISTS idx_traces_session_id ON traces(session_id)",
+    )
+    .exec(&mut db)
+    .await?;
+    toasty::sql::statement("CREATE INDEX IF NOT EXISTS idx_traces_ts ON traces(ts)")
+        .exec(&mut db)
+        .await?;
     Ok(())
 }
 
-fn insert_trace(connection: &rusqlite::Connection, trace: NewTrace) -> crate::error::Result<()> {
-    connection.execute(
-        "INSERT INTO traces (ts, session_id, dir, role, kind, method, request_id, payload)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        (
-            Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            trace.session_id,
-            trace.dir.as_str(),
-            trace.role,
-            trace.kind.as_str(),
-            trace.method,
-            trace.request_id,
-            serde_json::to_string(&trace.payload)?,
-        ),
-    )?;
+async fn remove_traces_for_session(db: &toasty::Db, session_id: &str) -> crate::error::Result<()> {
+    let mut db = db.clone();
+    Trace::filter(
+        Trace::fields()
+            .session_id()
+            .eq(Some(session_id.to_string())),
+    )
+    .delete()
+    .exec(&mut db)
+    .await?;
     Ok(())
 }
 
-fn remove_traces_for_session(path: &Path, session_id: &str) -> crate::error::Result<()> {
-    let connection = rusqlite::Connection::open(path)?;
-    connection.execute("DELETE FROM traces WHERE session_id = ?1", [session_id])?;
-    Ok(())
-}
-
-fn select_traces(
-    connection: &rusqlite::Connection,
+async fn select_traces(
+    db: &toasty::Db,
     query: TraceQuery,
 ) -> crate::error::Result<Vec<TraceRecord>> {
-    let mut sql = String::from(
-        "SELECT id, ts, session_id, dir, role, kind, method, request_id, payload FROM traces",
-    );
-    let mut predicates = Vec::new();
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-
+    let mut db = db.clone();
+    let mut stmt = Query::<List<Trace>>::all();
     if let Some(after_id) = query.after_id {
-        predicates.push("id > ?");
-        params.push(Box::new(i64::try_from(after_id).unwrap_or(i64::MAX)));
+        stmt = stmt.and(Trace::fields().id().gt(after_id));
     }
     if let Some(session_id) = query.session_id {
-        predicates.push("session_id = ?");
-        params.push(Box::new(session_id));
+        stmt = stmt.and(Trace::fields().session_id().eq(Some(session_id)));
     }
     if let Some(since) = query.since {
-        predicates.push("ts >= ?");
-        params.push(Box::new(
-            since.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        ));
+        stmt = stmt.and(
+            Trace::fields()
+                .ts()
+                .ge(since.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+        );
     }
     if let Some(method) = query.method {
-        predicates.push("method = ?");
-        params.push(Box::new(method));
+        stmt = stmt.and(Trace::fields().method().eq(Some(method)));
     }
     if let Some(dir) = query.dir {
-        predicates.push("dir = ?");
-        params.push(Box::new(dir.as_str().to_string()));
+        stmt = stmt.and(Trace::fields().dir().eq(dir.as_str()));
     }
 
-    if !predicates.is_empty() {
-        sql.push_str(" WHERE ");
-        sql.push_str(&predicates.join(" AND "));
-    }
-    sql.push_str(" ORDER BY id ASC LIMIT ?");
-    params.push(Box::new(query.limit.unwrap_or(500).min(5000)));
-
-    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-    let mut stmt = connection.prepare(&sql)?;
-    let rows = stmt.query_map(param_refs.as_slice(), trace_record_from_row)?;
-
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
-}
-
-fn trace_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TraceRecord> {
-    let ts: String = row.get(1)?;
-    let dir: String = row.get(3)?;
-    let kind: String = row.get(5)?;
-    let payload: String = row.get(8)?;
-
-    Ok(TraceRecord {
-        id: row.get::<_, i64>(0)?.try_into().map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Integer,
-                Box::new(e),
-            )
-        })?,
-        ts: DateTime::parse_from_rfc3339(&ts)
-            .map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    1,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })?
-            .with_timezone(&Utc),
-        session_id: row.get(2)?,
-        dir: TraceDirection::parse(&dir).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
-        })?,
-        role: row.get(4)?,
-        kind: TraceKind::parse(&kind).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(e))
-        })?,
-        method: row.get(6)?,
-        request_id: row.get(7)?,
-        payload: serde_json::from_str(&payload).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(e))
-        })?,
-    })
+    stmt.order_by(Trace::fields().id().asc());
+    stmt.limit(query.limit.unwrap_or(500).min(5000) as usize);
+    stmt.exec(&mut db)
+        .await?
+        .into_iter()
+        .map(TraceRecord::try_from)
+        .collect()
 }
 
 impl TraceDirection {
@@ -503,6 +447,24 @@ impl std::fmt::Display for TraceParseError {
 
 impl std::error::Error for TraceParseError {}
 
+impl TryFrom<Trace> for TraceRecord {
+    type Error = crate::error::Error;
+
+    fn try_from(trace: Trace) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: trace.id,
+            ts: DateTime::parse_from_rfc3339(&trace.ts)?.with_timezone(&Utc),
+            session_id: trace.session_id,
+            dir: TraceDirection::parse(&trace.dir)?,
+            role: trace.role,
+            kind: TraceKind::parse(&trace.kind)?,
+            method: trace.method,
+            request_id: trace.request_id,
+            payload: trace.payload.0,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,6 +486,7 @@ mod tests {
                 request_id: Some("7".to_string()),
                 payload: serde_json::json!({"prompt": "hello"}),
             })
+            .await
             .unwrap();
         store
             .record_trace(NewTrace {
@@ -535,6 +498,7 @@ mod tests {
                 request_id: None,
                 payload: serde_json::json!({}),
             })
+            .await
             .unwrap();
 
         let traces = store
@@ -542,6 +506,7 @@ mod tests {
                 session_id: Some("sess-1".to_string()),
                 ..TraceQuery::default()
             })
+            .await
             .unwrap();
 
         assert_eq!(traces.len(), 1);
@@ -568,28 +533,17 @@ mod tests {
                 request_id: None,
                 payload: serde_json::json!({}),
             })
+            .await
             .unwrap();
 
         store.remove_session("sess-1").await.unwrap();
 
-        assert!(store.traces(TraceQuery::default()).unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn open_writes_current_schema_version() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("jamsession.db");
-        Store::open(&path).await.unwrap();
-
-        let connection = rusqlite::Connection::open(path).unwrap();
-        let version = connection
-            .query_row(
-                "SELECT version FROM schema_version WHERE id = 1",
-                [],
-                |row| row.get::<_, u32>(0),
-            )
-            .unwrap();
-
-        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+        assert!(
+            store
+                .traces(TraceQuery::default())
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

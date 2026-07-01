@@ -34,10 +34,8 @@ scope-tasks = { version = "0.1.0", path = "../scope-tasks" }
 futures = "0.3.32"
 toml = "1.1.2"
 libc = "0.2.186"
-toasty = "0.7.0"
+toasty = { version = "0.7.0", features = ["serde"] }
 toasty-driver-sqlite = "0.7.0"
-rusqlite = "0.39.0"
 
 [dev-dependencies]
 tempfile = "3"
-
