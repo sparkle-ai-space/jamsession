@@ -11,10 +11,10 @@
 
 - [About RFDs](./rfds/README.md)
 - [Accepted](./rfds/accepted.md)
-  - [Message trace & debug viewer](./rfds/message-trace/README.md)
-  - [Session persistence](./rfds/session-persistence/README.md)
 - [Completed](./rfds/completed.md)
   - [RFD process](./rfds/rfd-process/README.md)
+  - [Session persistence](./rfds/session-persistence/README.md)
+  - [Message trace & debug viewer](./rfds/message-trace/README.md)
 
 # Appendices
 
